@@ -26,8 +26,16 @@ from tts_engine import TTSEngine
 # ── App Setup ──────────────────────────────────────────────────
 app = Flask(__name__)
 
-# Allow configurable origins for Vercel deployment
-ALLOWED_ORIGINS = os.getenv("ALLOWED_ORIGINS", "http://localhost:3000").split(",")
+# Allow configurable origins for Vercel deployment (removes whitespace and trailing slashes)
+# Now even more robust: if someone puts "app.vercel.app", it adds "https://" automatically
+def normalize_origin(orig):
+    orig = orig.strip().rstrip("/")
+    if orig and not orig.startswith(("http://", "https://")):
+        orig = f"https://{orig}"
+    return orig
+
+raw_origins = os.getenv("ALLOWED_ORIGINS", "http://localhost:3000").split(",")
+ALLOWED_ORIGINS = [normalize_origin(o) for o in raw_origins if o.strip()]
 CORS(app, origins=ALLOWED_ORIGINS)
 
 UPLOAD_DIR = os.path.join(os.path.dirname(__file__), "uploads")
@@ -192,11 +200,12 @@ def process_pdf_job(job_id: str, pdf_path: str, original_filename: str):
 
 
 # ── API Routes ─────────────────────────────────────────────────
+@app.route("/")
 @app.route("/health")
 @app.route("/api/health")
 def health():
-    """Health check endpoint for uptime monitoring / cron pings."""
-    return jsonify({"status": "ok", "service": "PDF to Audiobook API"})
+    """Health check endpoint for Render and uptime monitoring."""
+    return jsonify({"status": "ok", "service": "PDF to Audiobook API", "auth_ready": bool(ACCESS_CODE)})
 
 
 @app.route("/api/verify", methods=["POST"])
