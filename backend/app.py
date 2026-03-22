@@ -48,7 +48,7 @@ os.makedirs(OUTPUT_DIR, exist_ok=True)
 ACCESS_CODE = os.getenv("ACCESS_CODE", "audiobook2024")
 
 # Rate limiting: max conversions per hour per IP
-RATE_LIMIT_MAX = int(os.getenv("RATE_LIMIT_MAX", "5"))
+RATE_LIMIT_MAX = int(os.getenv("RATE_LIMIT_MAX", "20"))
 RATE_LIMIT_WINDOW = 3600  # 1 hour in seconds
 rate_limit_store = defaultdict(list)  # IP -> [timestamps]
 

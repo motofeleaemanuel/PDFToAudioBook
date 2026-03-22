@@ -5,6 +5,208 @@ import { useState, useRef, useCallback, useEffect } from "react";
 const rawApiUrl = process.env.NEXT_PUBLIC_API_URL || "http://localhost:5000/api";
 const API_BASE = rawApiUrl.endsWith("/api") ? rawApiUrl : `${rawApiUrl.replace(/\/$/, "")}/api`;
 
+function formatFileSize(bytes) {
+  if (bytes < 1024) return bytes + " B";
+  if (bytes < 1024 * 1024) return (bytes / 1024).toFixed(1) + " KB";
+  return (bytes / (1024 * 1024)).toFixed(1) + " MB";
+}
+
+function ConversionJob({ job, onRemove, getAuthHeaders, fetchAudiobooks, API_BASE }) {
+  const [jobId, setJobId] = useState(null);
+  const [status, setStatus] = useState("pending");
+  const [progress, setProgress] = useState(0);
+  const [message, setMessage] = useState("");
+  const [jobDetails, setJobDetails] = useState(null);
+  const [error, setError] = useState(null);
+  const pollingRef = useRef(null);
+  const startedRef = useRef(false);
+
+  useEffect(() => {
+    if (!startedRef.current) {
+      startedRef.current = true;
+      startConversion();
+    }
+    return () => {
+      if (pollingRef.current) clearInterval(pollingRef.current);
+    };
+  }, []);
+
+  const startConversion = async () => {
+    setStatus("uploading");
+    setProgress(0);
+    setMessage("Se încarcă fișierul...");
+    setError(null);
+
+    try {
+      const formData = new FormData();
+      formData.append("file", job.file);
+
+      const response = await fetch(`${API_BASE}/upload`, {
+        method: "POST",
+        headers: getAuthHeaders(),
+        body: formData,
+      });
+
+      if (response.status === 401) {
+        throw new Error("Sesiune expirată. Te rog reîncarcă pagina.");
+      }
+
+      if (!response.ok) {
+        const data = await response.json();
+        throw new Error(data.error || "Eroare la încărcare.");
+      }
+
+      const data = await response.json();
+      setJobId(data.job_id);
+      setStatus("processing");
+      startPolling(data.job_id);
+    } catch (err) {
+      setStatus("error");
+      setError(err.message || "Eroare de server. Asigură-te că rulează.");
+    }
+  };
+
+  const startPolling = (id) => {
+    if (pollingRef.current) clearInterval(pollingRef.current);
+
+    pollingRef.current = setInterval(async () => {
+      try {
+        const response = await fetch(`${API_BASE}/status/${id}`, {
+          headers: getAuthHeaders(),
+        });
+
+        if (response.status === 404) {
+          clearInterval(pollingRef.current);
+          pollingRef.current = null;
+          setStatus("error");
+          setError("Server repornit, job pierdut. Repetă încărcarea.");
+          return;
+        }
+
+        if (response.status === 401) {
+          clearInterval(pollingRef.current);
+          pollingRef.current = null;
+          setStatus("error");
+          setError("Sesiune expirată. Reîncarcă pagina.");
+          return;
+        }
+
+        if (!response.ok) throw new Error("Eroare la verificarea stării.");
+
+        const data = await response.json();
+        setProgress(data.progress);
+        setMessage(data.message);
+        setJobDetails(data);
+
+        if (data.status === "completed") {
+          clearInterval(pollingRef.current);
+          pollingRef.current = null;
+          setStatus("completed");
+          fetchAudiobooks();
+        } else if (data.status === "error") {
+          clearInterval(pollingRef.current);
+          pollingRef.current = null;
+          setStatus("error");
+          setError(data.message);
+        }
+      } catch (err) {
+        console.error("Polling error:", err);
+      }
+    }, 5000);
+  };
+
+  const downloadAudiobook = async () => {
+    if (!jobId) return;
+    const cloudUrl = jobDetails?.cloud_url;
+    if (cloudUrl) {
+      window.open(cloudUrl, "_blank");
+      return;
+    }
+    try {
+      const response = await fetch(`${API_BASE}/download/${jobId}`, {
+        headers: getAuthHeaders(),
+      });
+      if (!response.ok) throw new Error("Download failed");
+      const blob = await response.blob();
+      const url = window.URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = jobDetails?.output_filename || "audiobook.mp3";
+      document.body.appendChild(a);
+      a.click();
+      document.body.removeChild(a);
+      window.URL.revokeObjectURL(url);
+    } catch (err) {
+      setError("Eroare la descărcare. Încearcă din nou.");
+    }
+  };
+
+  const isProcessing = status === "uploading" || status === "processing";
+
+  return (
+    <div className="glass-card" style={{ marginTop: '24px', padding: '20px', position: 'relative' }}>
+      <button
+        className="remove-file-btn"
+        onClick={() => onRemove(job.id)}
+        title="Închide jobul"
+        style={{ position: 'absolute', top: '16px', right: '16px', zIndex: 10 }}
+      >
+        ✕
+      </button>
+
+      <div className="selected-file" style={{ border: 'none', padding: 0, justifyContent: 'flex-start' }}>
+        <span className="selected-file-icon">📕</span>
+        <div className="selected-file-info">
+          <div className="selected-file-name" style={{ fontSize: '1rem', paddingRight: '20px' }}>{job.file.name}</div>
+          <div className="selected-file-size" style={{ fontSize: '0.8rem', opacity: 0.7 }}>
+            {formatFileSize(job.file.size)}
+          </div>
+        </div>
+      </div>
+
+      {isProcessing && (
+        <div className="progress-section" style={{ marginTop: '16px' }}>
+          <div className="progress-header">
+            <span className="progress-status" style={{ fontSize: '0.9rem' }}>{message}</span>
+            <span className="progress-percent" style={{ fontSize: '0.9rem' }}>{progress}%</span>
+          </div>
+          <div className="progress-bar-track">
+            <div className="progress-bar-fill" style={{ width: `${progress}%` }} />
+          </div>
+          {jobDetails && (
+            <div className="progress-details" style={{ fontSize: '0.8rem' }}>
+              {jobDetails.total_pages > 0 && <span>📄 {jobDetails.total_pages} pag.</span>}
+              {jobDetails.total_chunks > 0 && <span style={{ marginLeft: '12px' }}>🧩 {jobDetails.current_chunk}/{jobDetails.total_chunks} secțiuni</span>}
+              {jobDetails.estimated_duration > 0 && <span style={{ marginLeft: '12px' }}>⏱️ ~{jobDetails.estimated_duration} min</span>}
+            </div>
+          )}
+          <div className="audio-wave">
+            {[...Array(8)].map((_, i) => <div key={i} className="audio-wave-bar" />)}
+          </div>
+        </div>
+      )}
+
+      {status === "completed" && (
+        <div className="success-section" style={{ padding: '16px 0 0 0', marginTop: '16px', borderTop: '1px solid var(--border-color)', backgroundColor: 'transparent' }}>
+          <h3 style={{ fontSize: '1.1rem', color: 'var(--success-color)', marginBottom: '8px' }}>🎉 Gata!</h3>
+          <p style={{ fontSize: '0.8rem', color: 'var(--text-muted)', marginBottom: '12px' }}>
+            {jobDetails?.output_filename || "audiobook.mp3"}
+          </p>
+          <button className="download-btn" onClick={downloadAudiobook} style={{ padding: '8px 16px', fontSize: '0.9rem' }}>
+            <span>⬇️</span> Descarcă MP3
+          </button>
+        </div>
+      )}
+
+      {error && (
+        <div className="error-section" style={{ marginTop: '16px' }}>
+          <p className="error-message" style={{ fontSize: '0.9rem' }}><span>⚠️</span> <span>{error}</span></p>
+        </div>
+      )}
+    </div>
+  );
+}
+
 export default function Home() {
   // ── Auth state ──────────────────────────────────
   const [isInitializing, setIsInitializing] = useState(true);
@@ -14,14 +216,8 @@ export default function Home() {
   const [authLoading, setAuthLoading] = useState(false);
 
   // ── App state ───────────────────────────────────
-  const [file, setFile] = useState(null);
+  const [activeJobs, setActiveJobs] = useState([]);
   const [dragOver, setDragOver] = useState(false);
-  const [jobId, setJobId] = useState(null);
-  const [status, setStatus] = useState(null);
-  const [progress, setProgress] = useState(0);
-  const [message, setMessage] = useState("");
-  const [jobDetails, setJobDetails] = useState(null);
-  const [error, setError] = useState(null);
 
   // ── History state ──────────────────────────────────
   const [audiobooks, setAudiobooks] = useState([]);
@@ -114,21 +310,21 @@ export default function Home() {
     storedCodeRef.current = "";
     setIsAuthenticated(false);
     setAccessCode("");
-    resetAll();
+    setActiveJobs([]);
   }, []);
 
   // ── File handling ────────────────────────────────
-  const handleFileSelect = useCallback((selectedFile) => {
-    if (!selectedFile) return;
-    if (!selectedFile.name.toLowerCase().endsWith(".pdf")) {
-      setError("Doar fișiere PDF sunt acceptate.");
-      return;
+  const handleFileSelect = useCallback((files) => {
+    if (!files || files.length === 0) return;
+    const newJobs = Array.from(files)
+      .filter((file) => file.name.toLowerCase().endsWith(".pdf"))
+      .map((file) => ({
+        id: Math.random().toString(36).substr(2, 9),
+        file,
+      }));
+    if (newJobs.length > 0) {
+      setActiveJobs((prev) => [...prev, ...newJobs]);
     }
-    setFile(selectedFile);
-    setError(null);
-    setStatus(null);
-    setJobId(null);
-    setJobDetails(null);
   }, []);
 
   const handleDragOver = useCallback((e) => {
@@ -145,154 +341,22 @@ export default function Home() {
     (e) => {
       e.preventDefault();
       setDragOver(false);
-      const droppedFile = e.dataTransfer.files[0];
-      handleFileSelect(droppedFile);
+      handleFileSelect(e.dataTransfer.files);
     },
     [handleFileSelect]
   );
 
   const handleInputChange = useCallback(
     (e) => {
-      handleFileSelect(e.target.files[0]);
+      handleFileSelect(e.target.files);
+      if (fileInputRef.current) fileInputRef.current.value = "";
     },
     [handleFileSelect]
   );
 
-  const removeFile = useCallback(() => {
-    setFile(null);
-    setError(null);
-    setStatus(null);
-    setJobId(null);
-    setJobDetails(null);
-    if (fileInputRef.current) fileInputRef.current.value = "";
+  const removeJob = useCallback((id) => {
+    setActiveJobs((prev) => prev.filter((j) => j.id !== id));
   }, []);
-
-  // ── Upload & Conversion ──────────────────────────
-  const startConversion = useCallback(async () => {
-    if (!file) return;
-
-    setStatus("uploading");
-    setProgress(0);
-    setMessage("Se încarcă fișierul...");
-    setError(null);
-
-    try {
-      const formData = new FormData();
-      formData.append("file", file);
-
-      const response = await fetch(`${API_BASE}/upload`, {
-        method: "POST",
-        headers: getAuthHeaders(),
-        body: formData,
-      });
-
-      if (response.status === 401) {
-        localStorage.removeItem("audiobook_access_code");
-        setIsAuthenticated(false);
-        setStatus(null);
-        return;
-      }
-
-      if (!response.ok) {
-        const data = await response.json();
-        throw new Error(data.error || "Eroare la încărcare.");
-      }
-
-      const data = await response.json();
-      setJobId(data.job_id);
-      setStatus("processing");
-      startPolling(data.job_id);
-    } catch (err) {
-      setStatus("error");
-      setError(
-        err.message ||
-          "Nu am putut contacta serverul. Asigură-te că backend-ul rulează."
-      );
-    }
-  }, [file, getAuthHeaders]);
-
-  const startPolling = useCallback(
-    (id) => {
-      if (pollingRef.current) clearInterval(pollingRef.current);
-
-      pollingRef.current = setInterval(async () => {
-        try {
-          const response = await fetch(`${API_BASE}/status/${id}`, {
-            headers: getAuthHeaders(),
-          });
-
-          if (response.status === 404) {
-            clearInterval(pollingRef.current);
-            pollingRef.current = null;
-            setStatus("error");
-            setError(
-              "Serverul a fost repornit și job-ul s-a pierdut. Te rog încearcă din nou."
-            );
-            return;
-          }
-
-          if (response.status === 401) {
-            clearInterval(pollingRef.current);
-            pollingRef.current = null;
-            localStorage.removeItem("audiobook_access_code");
-            setIsAuthenticated(false);
-            return;
-          }
-
-          if (!response.ok)
-            throw new Error("Eroare la verificarea stării.");
-
-          const data = await response.json();
-          setProgress(data.progress);
-          setMessage(data.message);
-          setJobDetails(data);
-
-          if (data.status === "completed") {
-            clearInterval(pollingRef.current);
-            pollingRef.current = null;
-            setStatus("completed");
-            fetchAudiobooks(); // Refresh history immediately
-          } else if (data.status === "error") {
-            clearInterval(pollingRef.current);
-            pollingRef.current = null;
-            setStatus("error");
-            setError(data.message);
-          }
-        } catch (err) {
-          console.error("Polling error:", err);
-        }
-      }, 1500);
-    },
-    [getAuthHeaders, fetchAudiobooks]
-  );
-
-  const downloadAudiobook = useCallback(async () => {
-    if (!jobId) return;
-    // If we have a cloud URL (Supabase), use that directly
-    const cloudUrl = jobDetails?.cloud_url;
-    if (cloudUrl) {
-      window.open(cloudUrl, "_blank");
-      return;
-    }
-    // Fallback: download from backend
-    try {
-      const response = await fetch(`${API_BASE}/download/${jobId}`, {
-        headers: getAuthHeaders(),
-      });
-      if (!response.ok) throw new Error("Download failed");
-      const blob = await response.blob();
-      const url = window.URL.createObjectURL(blob);
-      const a = document.createElement("a");
-      a.href = url;
-      a.download = jobDetails?.output_filename || "audiobook.mp3";
-      document.body.appendChild(a);
-      a.click();
-      document.body.removeChild(a);
-      window.URL.revokeObjectURL(url);
-    } catch (err) {
-      setError("Eroare la descărcare. Încearcă din nou.");
-    }
-  }, [jobId, jobDetails, getAuthHeaders]);
 
   const deleteAudiobook = useCallback(
     async (id) => {
@@ -303,7 +367,6 @@ export default function Home() {
         });
         if (response.ok) {
           setAudiobooks((prev) => prev.filter((a) => a.id !== id));
-          // Refresh storage state after delete
           fetchAudiobooks();
         }
       } catch {
@@ -312,25 +375,6 @@ export default function Home() {
     },
     [getAuthHeaders, fetchAudiobooks]
   );
-
-  const resetAll = useCallback(() => {
-    if (pollingRef.current) clearInterval(pollingRef.current);
-    setFile(null);
-    setJobId(null);
-    setStatus(null);
-    setProgress(0);
-    setMessage("");
-    setJobDetails(null);
-    setError(null);
-    if (fileInputRef.current) fileInputRef.current.value = "";
-  }, []);
-
-  // ── Helpers ──────────────────────────────────────
-  const formatFileSize = (bytes) => {
-    if (bytes < 1024) return bytes + " B";
-    if (bytes < 1024 * 1024) return (bytes / 1024).toFixed(1) + " KB";
-    return (bytes / (1024 * 1024)).toFixed(1) + " MB";
-  };
 
   const isProcessing = status === "uploading" || status === "processing";
 
@@ -422,158 +466,42 @@ export default function Home() {
         </button>
       </header>
 
-      {/* Main Card */}
-      <div className="glass-card">
-        {/* Drop Zone (hidden during/after processing) */}
-        {!isProcessing && status !== "completed" && (
-          <>
-            <div
-              className={`drop-zone ${dragOver ? "drag-over" : ""}`}
-              onDragOver={handleDragOver}
-              onDragLeave={handleDragLeave}
-              onDrop={handleDrop}
-              onClick={() => fileInputRef.current?.click()}
-              id="drop-zone"
-            >
-              <span className="drop-zone-icon">📄</span>
-              <h3>Trage fișierul PDF aici</h3>
-              <p>sau click pentru a selecta un fișier</p>
-              <input
-                ref={fileInputRef}
-                type="file"
-                accept=".pdf"
-                onChange={handleInputChange}
-                id="file-input"
-              />
-            </div>
+      {/* Drop Zone */}
+      <div className="glass-card" style={{ marginBottom: '24px' }}>
+        <div
+          className={`drop-zone ${dragOver ? "drag-over" : ""}`}
+          onDragOver={handleDragOver}
+          onDragLeave={handleDragLeave}
+          onDrop={handleDrop}
+          onClick={() => fileInputRef.current?.click()}
+          id="drop-zone"
+        >
+          <span className="drop-zone-icon">📄</span>
+          <h3>Trage fișierele PDF aici</h3>
+          <p>sau dă click pentru a încărca mai multe deodată</p>
+          <input
+            ref={fileInputRef}
+            type="file"
+            accept=".pdf"
+            multiple
+            onChange={handleInputChange}
+            id="file-input"
+          />
+        </div>
+      </div>
 
-            {/* Selected file info */}
-            {file && (
-              <div className="selected-file">
-                <span className="selected-file-icon">📕</span>
-                <div className="selected-file-info">
-                  <div className="selected-file-name">{file.name}</div>
-                  <div className="selected-file-size">
-                    {formatFileSize(file.size)}
-                  </div>
-                </div>
-                <button
-                  className="remove-file-btn"
-                  onClick={(e) => {
-                    e.stopPropagation();
-                    removeFile();
-                  }}
-                  title="Elimină fișierul"
-                  id="remove-file-btn"
-                >
-                  ✕
-                </button>
-              </div>
-            )}
-
-            {/* Convert button */}
-            <button
-              className="convert-btn"
-              disabled={!file}
-              onClick={startConversion}
-              id="convert-btn"
-            >
-              <span>🎙️</span>
-              Convertește în Audiobook
-            </button>
-          </>
-        )}
-
-        {/* Progress Section */}
-        {isProcessing && (
-          <div className="progress-section">
-            <div className="progress-header">
-              <span className="progress-status">{message}</span>
-              <span className="progress-percent">{progress}%</span>
-            </div>
-
-            <div className="progress-bar-track">
-              <div
-                className="progress-bar-fill"
-                style={{ width: `${progress}%` }}
-              />
-            </div>
-
-            {jobDetails && (
-              <div className="progress-details">
-                {jobDetails.total_pages > 0 && (
-                  <span className="progress-detail">
-                    <span className="progress-detail-icon">📄</span>
-                    {jobDetails.total_pages} pagini
-                  </span>
-                )}
-                {jobDetails.total_chunks > 0 && (
-                  <span className="progress-detail">
-                    <span className="progress-detail-icon">🧩</span>
-                    {jobDetails.current_chunk}/{jobDetails.total_chunks}{" "}
-                    secțiuni
-                  </span>
-                )}
-                {jobDetails.estimated_duration > 0 && (
-                  <span className="progress-detail">
-                    <span className="progress-detail-icon">⏱️</span>~
-                    {jobDetails.estimated_duration} min durată estimată
-                  </span>
-                )}
-              </div>
-            )}
-
-            {/* Audio waveform animation */}
-            <div className="audio-wave">
-              {[...Array(8)].map((_, i) => (
-                <div key={i} className="audio-wave-bar" />
-              ))}
-            </div>
-          </div>
-        )}
-
-        {/* Success Section */}
-        {status === "completed" && (
-          <div className="success-section">
-            <span className="success-icon">🎉</span>
-            <h2 className="success-title">Audiobook-ul este gata!</h2>
-            <p className="success-subtitle">
-              {jobDetails?.output_filename || "audiobook.mp3"}
-              {jobDetails?.estimated_duration > 0 &&
-                ` • ~${jobDetails.estimated_duration} minute`}
-            </p>
-
-            <button
-              className="download-btn"
-              onClick={downloadAudiobook}
-              id="download-btn"
-            >
-              <span>⬇️</span>
-              Descarcă MP3
-            </button>
-
-            <br />
-
-            <button
-              className="new-conversion-btn"
-              onClick={resetAll}
-              id="new-conversion-btn"
-            >
-              <span>🔄</span>
-              Conversie nouă
-            </button>
-          </div>
-        )}
-
-        {/* Error display */}
-        {error && (
-          <div className="error-section">
-            <p className="error-message">
-              <span className="error-icon">⚠️</span>
-              <span>{error}</span>
-            </p>
-          </div>
-        )}
+      {/* Active Jobs Map */}
+      <div className="active-jobs-container">
+        {activeJobs.map(job => (
+          <ConversionJob 
+            key={job.id} 
+            job={job} 
+            onRemove={removeJob} 
+            getAuthHeaders={getAuthHeaders} 
+            fetchAudiobooks={fetchAudiobooks} 
+            API_BASE={API_BASE}
+          />
+        ))}
       </div>
 
       {/* Audiobook History */}
