@@ -5,6 +5,7 @@ Converts text to speech using OpenAI TTS API (high-quality, natural voices).
 
 import os
 import io
+import concurrent.futures
 from typing import List, Optional, Callable
 from openai import OpenAI
 
@@ -88,7 +89,7 @@ class TTSEngine:
         progress_callback: Optional[Callable[[int, int, str], None]] = None,
     ) -> str:
         """
-        Convert a list of text chunks into a single MP3 audiobook.
+        Convert a list of text chunks into a single MP3 audiobook in parallel.
 
         Args:
             chunks: List of TextChunk objects to convert
@@ -104,28 +105,52 @@ class TTSEngine:
         # Ensure output directory exists
         os.makedirs(os.path.dirname(output_path) or ".", exist_ok=True)
 
-        total = len(chunks)
+        # 1. Flatten into sub-chunks for precise ordered assembly
+        flat_sub_chunks = []
+        for i, chunk in enumerate(chunks):
+            sub_texts = cls._split_oversized_chunk(chunk.text)
+            for sub_text in sub_texts:
+                flat_sub_chunks.append({
+                    "original_index": i,
+                    "sub_index": len(flat_sub_chunks),
+                    "text": sub_text,
+                    "chunk_obj": chunk
+                })
 
-        # Write MP3 chunks directly to output file
-        with open(output_path, "wb") as out_file:
-            for i, chunk in enumerate(chunks):
+        total_sub_chunks = len(flat_sub_chunks)
+        results_bytes = {}
+        completed = 0
+
+        def process_audio(sub_info):
+            sub_chunk = TextChunk(index=sub_info["chunk_obj"].index, text=sub_info["text"])
+            return sub_info["sub_index"], sub_info["original_index"], cls.convert_chunk_to_bytes(sub_chunk)
+
+        # 2. Parallel processing
+        with concurrent.futures.ThreadPoolExecutor(max_workers=4) as executor:
+            future_to_info = {executor.submit(process_audio, info): info for info in flat_sub_chunks}
+
+            for future in concurrent.futures.as_completed(future_to_info):
+                info = future_to_info[future]
+                try:
+                    c_idx, orig_idx, mp3_bytes = future.result()
+                    results_bytes[c_idx] = mp3_bytes
+                except Exception as e:
+                    print(f"Eroare la generare audio (chunk {info['original_index'] + 1}): {e}")
+                    results_bytes[info["sub_index"]] = b""
+
+                completed += 1
                 if progress_callback:
                     progress_callback(
-                        i + 1,
-                        total,
-                        f"Convertesc secțiunea {i + 1} din {total}..."
+                        completed,
+                        total_sub_chunks,
+                        f"Conversie audio (paralelizată) - secțiunea {completed} din {total_sub_chunks}..."
                     )
 
-                # Safety split if chunk exceeds TTS limit
-                sub_texts = cls._split_oversized_chunk(chunk.text)
-                for sub_text in sub_texts:
-                    try:
-                        sub_chunk = TextChunk(index=chunk.index, text=sub_text)
-                        mp3_bytes = cls.convert_chunk_to_bytes(sub_chunk)
-                        out_file.write(mp3_bytes)
-                    except Exception as e:
-                        print(f"Eroare la chunk {i + 1}: {e}")
-                        continue
+        # 3. Assemble final MP3 File
+        with open(output_path, "wb") as out_file:
+            for c_idx in range(total_sub_chunks):
+                if c_idx in results_bytes and results_bytes[c_idx]:
+                    out_file.write(results_bytes[c_idx])
 
         # Verify we actually wrote something
         if os.path.getsize(output_path) == 0:

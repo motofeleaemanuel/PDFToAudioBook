@@ -18,6 +18,7 @@ function ConversionJob({ job, onRemove, getAuthHeaders, fetchAudiobooks, API_BAS
   const [message, setMessage] = useState("");
   const [jobDetails, setJobDetails] = useState(null);
   const [error, setError] = useState(null);
+  const [isDownloading, setIsDownloading] = useState(false);
   const pollingRef = useRef(null);
   const startedRef = useRef(false);
 
@@ -116,17 +117,14 @@ function ConversionJob({ job, onRemove, getAuthHeaders, fetchAudiobooks, API_BAS
   };
 
   const downloadAudiobook = async () => {
-    if (!jobId) return;
-    const cloudUrl = jobDetails?.cloud_url;
-    if (cloudUrl) {
-      window.open(cloudUrl, "_blank");
-      return;
-    }
+    if (!jobId || isDownloading) return;
+    setIsDownloading(true);
     try {
       const response = await fetch(`${API_BASE}/download/${jobId}`, {
         headers: getAuthHeaders(),
       });
       if (!response.ok) throw new Error("Download failed");
+      // Handle redirect responses (cloud URL) — fetch follows redirects automatically
       const blob = await response.blob();
       const url = window.URL.createObjectURL(blob);
       const a = document.createElement("a");
@@ -138,6 +136,8 @@ function ConversionJob({ job, onRemove, getAuthHeaders, fetchAudiobooks, API_BAS
       window.URL.revokeObjectURL(url);
     } catch (err) {
       setError("Eroare la descărcare. Încearcă din nou.");
+    } finally {
+      setIsDownloading(false);
     }
   };
 
@@ -192,8 +192,12 @@ function ConversionJob({ job, onRemove, getAuthHeaders, fetchAudiobooks, API_BAS
           <p style={{ fontSize: '0.8rem', color: 'var(--text-muted)', marginBottom: '12px' }}>
             {jobDetails?.output_filename || "audiobook.mp3"}
           </p>
-          <button className="download-btn" onClick={downloadAudiobook} style={{ padding: '8px 16px', fontSize: '0.9rem' }}>
-            <span>⬇️</span> Descarcă MP3
+          <button className="download-btn" onClick={downloadAudiobook} disabled={isDownloading} style={{ padding: '8px 16px', fontSize: '0.9rem', opacity: isDownloading ? 0.7 : 1 }}>
+            {isDownloading ? (
+              <><span className="spinner" style={{ display: 'inline-block', width: '14px', height: '14px', border: '2px solid rgba(255,255,255,0.3)', borderTop: '2px solid #fff', borderRadius: '50%', animation: 'spin 0.8s linear infinite', marginRight: '6px', verticalAlign: 'middle' }} /> Se descarcă...</>
+            ) : (
+              <><span>⬇️</span> Descarcă MP3</>
+            )}
           </button>
         </div>
       )}
@@ -375,8 +379,6 @@ export default function Home() {
     },
     [getAuthHeaders, fetchAudiobooks]
   );
-
-  const isProcessing = status === "uploading" || status === "processing";
 
   // ── Render ──────────────────────────────────────
   if (isInitializing) {

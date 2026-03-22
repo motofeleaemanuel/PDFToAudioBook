@@ -15,7 +15,7 @@ from dotenv import load_dotenv
 # Load environment variables from .env
 load_dotenv()
 
-from flask import Flask, request, jsonify, send_file
+from flask import Flask, request, jsonify, send_file, redirect
 from flask_cors import CORS
 
 from pdf_extractor import PDFExtractor
@@ -188,7 +188,10 @@ def process_pdf_job(job_id: str, pdf_path: str, original_filename: str):
 
         if AudiobookStorage.is_configured():
             try:
-                metadata = AudiobookStorage.upload_audiobook(
+                file_size_bytes = os.path.getsize(output_path)
+                size_mb = file_size_bytes / (1024 * 1024)
+                print(f"  ☁️ Uploading to Supabase... ({size_mb:.1f} MB)")
+                metadata = AudiobookStorage.upload_audiobook_chunked(
                     local_path=output_path,
                     original_name=original_filename,
                     duration_minutes=job["estimated_duration"],
@@ -196,8 +199,15 @@ def process_pdf_job(job_id: str, pdf_path: str, original_filename: str):
                 )
                 job["cloud_url"] = metadata.get("public_url", "")
                 job["audiobook_id"] = metadata.get("id", "")
+                parts = metadata.get("parts")
+                if parts and parts > 1:
+                    print(f"  ✅ Supabase upload OK — {parts} părți uploadate")
+                else:
+                    print(f"  ✅ Supabase upload OK — cloud_url: {job['cloud_url']}")
             except Exception as e:
+                import traceback
                 print(f"  ⚠️ Supabase upload failed: {e}")
+                traceback.print_exc()
                 # Continue anyway — file is still local
         else:
             print("  ⚠️ Supabase not configured — keeping file local only")
@@ -215,18 +225,19 @@ def process_pdf_job(job_id: str, pdf_path: str, original_filename: str):
         print(f"Job {job_id} error: {e}")
 
     finally:
-        # Cleanup ALL local files to save disk space
+        # Cleanup temp files (PDF, text) to save disk space
         for path in [
             pdf_path,
             os.path.join(OUTPUT_DIR, f"{job_id}_text.txt"),
             os.path.join(OUTPUT_DIR, f"{job_id}_refined.txt"),
-            os.path.join(OUTPUT_DIR, f"{job_id}.mp3"),
         ]:
             try:
                 if os.path.exists(path):
                     os.remove(path)
             except Exception:
                 pass
+        # NOTE: MP3 is kept locally until downloaded, then cleaned up
+        #       by the /api/download endpoint
 
 
 # ── API Routes ─────────────────────────────────────────────────
@@ -376,15 +387,37 @@ def download_file(job_id: str):
     if job["status"] != "completed":
         return jsonify({"error": "Conversia nu este finalizată încă."}), 400
 
-    if not job["output_path"] or not os.path.exists(job["output_path"]):
-        return jsonify({"error": "Fișierul audio nu a fost găsit."}), 404
+    # Prefer local file (complete audiobook) over cloud (may be chunked)
+    if job.get("output_path") and os.path.exists(job["output_path"]):
+        local_path = job["output_path"]
 
-    return send_file(
-        job["output_path"],
-        as_attachment=True,
-        download_name=job["output_filename"],
-        mimetype="audio/mpeg"
-    )
+        # Schedule safe delayed cleanup (60s after download starts)
+        def delayed_cleanup():
+            import time as _time
+            _time.sleep(60)
+            try:
+                if os.path.exists(local_path):
+                    os.remove(local_path)
+                    print(f"  🗑️ Local MP3 șters după download: {local_path}")
+            except Exception:
+                pass
+
+        cleanup_thread = threading.Thread(target=delayed_cleanup, daemon=True)
+        cleanup_thread.start()
+
+        return send_file(
+            local_path,
+            as_attachment=True,
+            download_name=job.get("output_filename", "audiobook.mp3"),
+            mimetype="audio/mpeg"
+        )
+
+    # Fallback: redirect to cloud URL if local file was already cleaned up
+    cloud_url = job.get("cloud_url")
+    if cloud_url:
+        return redirect(cloud_url)
+
+    return jsonify({"error": "Fișierul audio nu a fost găsit."}), 404
 
 
 # ── Main ───────────────────────────────────────────────────────

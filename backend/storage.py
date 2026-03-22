@@ -98,6 +98,89 @@ class AudiobookStorage:
         print(f"  ☁️ Audiobook uploadat în Supabase: {storage_path} ({file_size} bytes)")
         return metadata
 
+    CHUNK_SIZE = 45 * 1024 * 1024  # 45 MB per part (under 50 MB Supabase limit)
+
+    @classmethod
+    def upload_audiobook_chunked(
+        cls,
+        local_path: str,
+        original_name: str,
+        duration_minutes: float = 0,
+        total_pages: int = 0,
+    ) -> Dict:
+        """
+        Smart upload: if file <= 45MB, upload normally.
+        If larger, split into ~45MB parts and upload each as Part 1, Part 2, etc.
+        Returns metadata dict with public_url of first part (or single file).
+        """
+        file_size = os.path.getsize(local_path)
+
+        # Small file — normal upload
+        if file_size <= cls.CHUNK_SIZE:
+            return cls.upload_audiobook(
+                local_path=local_path,
+                original_name=original_name,
+                duration_minutes=duration_minutes,
+                total_pages=total_pages,
+            )
+
+        # Large file — split and upload parts
+        client = cls._get_client()
+        base_name = os.path.splitext(original_name)[0]
+        safe_base = base_name.replace(" ", "_").replace("/", "_")
+        group_id = str(uuid.uuid4())  # Groups all parts together
+
+        num_parts = (file_size + cls.CHUNK_SIZE - 1) // cls.CHUNK_SIZE
+        first_public_url = ""
+        total_uploaded = 0
+
+        with open(local_path, "rb") as f:
+            for part_num in range(1, num_parts + 1):
+                chunk_data = f.read(cls.CHUNK_SIZE)
+                if not chunk_data:
+                    break
+
+                part_id = str(uuid.uuid4())
+                part_filename = f"{safe_base}_Part{part_num}.mp3"
+                storage_path = f"{group_id}/{part_filename}"
+                chunk_size = len(chunk_data)
+
+                # Upload chunk
+                client.storage.from_(cls.BUCKET_NAME).upload(
+                    path=storage_path,
+                    file=chunk_data,
+                    file_options={"content-type": "audio/mpeg"},
+                )
+
+                public_url = client.storage.from_(cls.BUCKET_NAME).get_public_url(storage_path)
+                if part_num == 1:
+                    first_public_url = public_url
+
+                # Estimate duration proportionally
+                part_duration = round(duration_minutes * (chunk_size / file_size), 1)
+
+                metadata = {
+                    "id": part_id,
+                    "filename": part_filename,
+                    "original_name": f"{base_name} - Part {part_num}",
+                    "storage_path": storage_path,
+                    "size_bytes": chunk_size,
+                    "duration_minutes": part_duration,
+                    "total_pages": total_pages if part_num == 1 else 0,
+                    "public_url": public_url,
+                }
+
+                client.table(cls.TABLE_NAME).insert(metadata).execute()
+                total_uploaded += chunk_size
+                print(f"  ☁️ Part {part_num}/{num_parts} uploadat: {part_filename} ({chunk_size} bytes)")
+
+        print(f"  ✅ Total uploadat: {num_parts} părți, {total_uploaded} bytes")
+        return {
+            "id": group_id,
+            "public_url": first_public_url,
+            "parts": num_parts,
+        }
+
     @classmethod
     def list_audiobooks(cls) -> List[Dict]:
         """List all audiobooks, newest first."""

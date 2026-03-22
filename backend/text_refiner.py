@@ -5,6 +5,7 @@ Ensures fluency, proper Romanian, handles symbols, and preserves all information
 """
 
 import os
+import concurrent.futures
 from typing import List, Optional, Callable
 from openai import OpenAI
 
@@ -85,7 +86,7 @@ class TextRefiner:
         progress_callback: Optional[Callable[[int, int, str], None]] = None
     ) -> List[TextChunk]:
         """
-        Refine all text chunks using GPT.
+        Refine all text chunks using GPT in parallel.
 
         Args:
             chunks: List of TextChunk objects to refine
@@ -94,24 +95,44 @@ class TextRefiner:
         Returns:
             List of refined TextChunk objects
         """
-        refined_chunks = []
         total = len(chunks)
+        if total == 0:
+            return []
 
-        for i, chunk in enumerate(chunks):
-            if progress_callback:
-                progress_callback(
-                    i + 1,
-                    total,
-                    f"Rafinare AI secțiunea {i + 1} din {total}..."
-                )
+        refined_chunks = []
+        completed = 0
+        results_dict = {}
 
+        def process_chunk(chunk: TextChunk) -> TextChunk:
             try:
-                refined = cls.refine_chunk(chunk)
-                refined_chunks.append(refined)
+                return cls.refine_chunk(chunk)
             except Exception as e:
-                print(f"Eroare rafinare chunk {i + 1}: {e}")
+                print(f"Eroare rafinare chunk {chunk.index}: {e}")
                 # Fallback: use original chunk if refinement fails
-                refined_chunks.append(chunk)
+                return chunk
+
+        with concurrent.futures.ThreadPoolExecutor(max_workers=5) as executor:
+            future_to_index = {
+                executor.submit(process_chunk, chunk): i 
+                for i, chunk in enumerate(chunks)
+            }
+
+            for future in concurrent.futures.as_completed(future_to_index):
+                original_index = future_to_index[future]
+                result_chunk = future.result()
+                results_dict[original_index] = result_chunk
+
+                completed += 1
+                if progress_callback:
+                    progress_callback(
+                        completed,
+                        total,
+                        f"Rafinare AI (paralelizată) - secțiunea {completed} din {total}..."
+                    )
+
+        # Assemble in original order
+        for i in range(total):
+            refined_chunks.append(results_dict[i])
 
         return refined_chunks
 

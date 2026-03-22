@@ -8,6 +8,7 @@ import fitz  # PyMuPDF
 import os
 import io
 import base64
+import concurrent.futures
 from dataclasses import dataclass, field
 from typing import List, Optional, Callable
 from openai import OpenAI
@@ -80,27 +81,18 @@ class PDFExtractor:
         return cls._client
 
     @classmethod
-    def _ocr_page_with_vision(cls, page) -> str:
+    def _ocr_image_base64_with_vision(cls, img_b64: str) -> str:
         """
-        Perform OCR on a PDF page using OpenAI Vision (GPT-4o).
-        Renders the page to an image, encodes it as base64, and sends to GPT-4o.
+        Perform OCR on a base64 encoded PNG image using OpenAI Vision (GPT-4o).
 
         Args:
-            page: A PyMuPDF page object
+            img_b64: Base64 encoded PNG image string
 
         Returns:
             Extracted text from the image
         """
         try:
             client = cls._get_client()
-
-            # Render page to a PNG image
-            mat = fitz.Matrix(RENDER_DPI / 72, RENDER_DPI / 72)
-            pix = page.get_pixmap(matrix=mat, alpha=False)
-            img_bytes = pix.tobytes("png")
-
-            # Encode to base64
-            img_b64 = base64.b64encode(img_bytes).decode("utf-8")
 
             # Send to GPT-4o Vision
             response = client.chat.completions.create(
@@ -172,46 +164,92 @@ class PDFExtractor:
             }
         )
 
-        ocr_count = 0
+        pages_data = []
 
+        # Phase 1: Sequential extraction and PNG rendering
         for page_num in range(pages_to_process):
             page = doc[page_num]
-            used_ocr = False
 
             if progress_callback:
                 progress_callback(
                     page_num + 1,
                     pages_to_process,
-                    f"Extrag pagina {page_num + 1} din {pages_to_process}..."
+                    f"Analizez și extrag secțiunile - Pagina {page_num + 1}/{pages_to_process}..."
                 )
 
-            # Step 1: Try normal text extraction
+            # Try normal text extraction
             text = ""
             if not force_ocr:
                 text = page.get_text("text").strip()
 
-            # Step 2: If text is too short, use OpenAI Vision OCR
+            # If text is too short, mark for OpenAI Vision OCR and render to base64
             if len(text) < MIN_TEXT_CHARS:
-                if progress_callback:
-                    progress_callback(
-                        page_num + 1,
-                        len(doc),
-                        f"Vision OCR pagina {page_num + 1} din {len(doc)}..."
-                    )
-                ocr_text = cls._ocr_page_with_vision(page)
-                if len(ocr_text) > len(text):
-                    text = ocr_text
-                    used_ocr = True
-                    ocr_count += 1
+                mat = fitz.Matrix(RENDER_DPI / 72, RENDER_DPI / 72)
+                pix = page.get_pixmap(matrix=mat, alpha=False)
+                img_bytes = pix.tobytes("png")
+                img_b64 = base64.b64encode(img_bytes).decode("utf-8")
+                
+                pages_data.append({
+                    "page_num": page_num + 1,
+                    "text": text,
+                    "needs_ocr": True,
+                    "img_b64": img_b64,
+                    "is_ocr": False
+                })
+            else:
+                pages_data.append({
+                    "page_num": page_num + 1,
+                    "text": text,
+                    "needs_ocr": False,
+                    "img_b64": None,
+                    "is_ocr": False
+                })
 
+        doc.close()
+
+        # Phase 2: Parallel Vision OCR processing
+        ocr_tasks = [p for p in pages_data if p["needs_ocr"]]
+        ocr_count = len(ocr_tasks)
+
+        if ocr_count > 0:
+            completed_ocr = 0
+
+            def process_ocr(page_data):
+                ocr_text = cls._ocr_image_base64_with_vision(page_data["img_b64"])
+                return page_data["page_num"], ocr_text
+
+            # Execute concurrent requests
+            with concurrent.futures.ThreadPoolExecutor(max_workers=4) as executor:
+                future_to_page = {executor.submit(process_ocr, p): p for p in ocr_tasks}
+                
+                for future in concurrent.futures.as_completed(future_to_page):
+                    p_num, ocr_text = future.result()
+                    
+                    # Update the corresponding page data
+                    for p in pages_data:
+                        if p["page_num"] == p_num:
+                            if len(ocr_text) > len(p["text"]):
+                                p["text"] = ocr_text
+                                p["is_ocr"] = True
+                            break
+
+                    completed_ocr += 1
+                    if progress_callback:
+                        progress_callback(
+                            completed_ocr,
+                            ocr_count,
+                            f"Vision OCR (GPT-4o) în paralel - Pagina {completed_ocr} din {ocr_count}..."
+                        )
+
+        # Re-assemble final PDFContent
+        for p in pages_data:
             content.pages.append(PageContent(
-                page_number=page_num + 1,
-                text=text,
-                is_ocr=used_ocr
+                page_number=p["page_num"],
+                text=p["text"],
+                is_ocr=p["is_ocr"]
             ))
 
-        content.ocr_pages_count = ocr_count
-        doc.close()
+        content.ocr_pages_count = sum(1 for p in pages_data if p["is_ocr"])
         return content
 
     @staticmethod
