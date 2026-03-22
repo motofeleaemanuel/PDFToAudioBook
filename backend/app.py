@@ -421,6 +421,13 @@ def download_file(job_id: str):
 
 
 # ── Main ───────────────────────────────────────────────────────
+@app.route("/", methods=["GET"])
+@app.route("/health", methods=["GET"])
+def health_check():
+    """Simple health check endpoint for Render routing."""
+    return jsonify({"status": "ok", "service": "PDF to Audiobook API"}), 200
+
+
 if __name__ == "__main__":
     print("🎧 PDF to Audiobook API - Starting...")
     print(f"📡 Server: http://localhost:5000")

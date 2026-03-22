@@ -1,8 +1,5 @@
 import os
 
-# Bind to the PORT env variable set by Render (default 5000 for local dev)
-bind = f"0.0.0.0:{os.environ.get('PORT', '5000')}"
-
 # Single worker with threads — allows background threads (PDF processing)
 # to share memory with request-handling threads (status polling)
 workers = 1
