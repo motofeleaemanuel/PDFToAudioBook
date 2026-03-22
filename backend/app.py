@@ -22,6 +22,7 @@ from pdf_extractor import PDFExtractor
 from text_processor import TextProcessor
 from text_refiner import TextRefiner
 from tts_engine import TTSEngine
+from storage import AudiobookStorage
 
 # ── App Setup ──────────────────────────────────────────────────
 app = Flask(__name__)
@@ -81,6 +82,8 @@ def require_access_code(f):
     """Decorator to require access code in Authorization header."""
     @wraps(f)
     def decorated(*args, **kwargs):
+        if request.method == "OPTIONS":
+            return jsonify({}), 200
         auth_header = request.headers.get("Authorization", "")
         if not auth_header.startswith("Bearer "):
             return jsonify({"error": "Cod de acces lipsă."}), 401
@@ -178,6 +181,27 @@ def process_pdf_job(job_id: str, pdf_path: str, original_filename: str):
             progress_callback=on_tts_progress
         )
 
+        # Phase 5: Upload to Supabase (95-100%)
+        job["status"] = "uploading_cloud"
+        job["progress"] = 96
+        job["message"] = "Salvez audiobook-ul în cloud..."
+
+        if AudiobookStorage.is_configured():
+            try:
+                metadata = AudiobookStorage.upload_audiobook(
+                    local_path=output_path,
+                    original_name=original_filename,
+                    duration_minutes=job["estimated_duration"],
+                    total_pages=job["total_pages"],
+                )
+                job["cloud_url"] = metadata.get("public_url", "")
+                job["audiobook_id"] = metadata.get("id", "")
+            except Exception as e:
+                print(f"  ⚠️ Supabase upload failed: {e}")
+                # Continue anyway — file is still local
+        else:
+            print("  ⚠️ Supabase not configured — keeping file local only")
+
         # Done!
         job["status"] = "completed"
         job["progress"] = 100
@@ -191,12 +215,18 @@ def process_pdf_job(job_id: str, pdf_path: str, original_filename: str):
         print(f"Job {job_id} error: {e}")
 
     finally:
-        # Cleanup uploaded PDF
-        try:
-            if os.path.exists(pdf_path):
-                os.remove(pdf_path)
-        except Exception:
-            pass
+        # Cleanup ALL local files to save disk space
+        for path in [
+            pdf_path,
+            os.path.join(OUTPUT_DIR, f"{job_id}_text.txt"),
+            os.path.join(OUTPUT_DIR, f"{job_id}_refined.txt"),
+            os.path.join(OUTPUT_DIR, f"{job_id}.mp3"),
+        ]:
+            try:
+                if os.path.exists(path):
+                    os.remove(path)
+            except Exception:
+                pass
 
 
 # ── API Routes ─────────────────────────────────────────────────
@@ -208,17 +238,20 @@ def health():
     return jsonify({"status": "ok", "service": "PDF to Audiobook API", "auth_ready": bool(ACCESS_CODE)})
 
 
-@app.route("/api/verify", methods=["POST"])
+@app.route("/api/verify", methods=["POST", "OPTIONS"])
 def verify_access_code():
     """Verify the access code — used by frontend login screen."""
-    data = request.get_json() or {}
+    if request.method == "OPTIONS":
+        return jsonify({}), 200
+        
+    data = request.get_json(silent=True) or {}
     code = data.get("code", "")
     if code == ACCESS_CODE:
         return jsonify({"valid": True})
     return jsonify({"valid": False, "error": "Cod de acces invalid."}), 401
 
 
-@app.route("/api/upload", methods=["POST"])
+@app.route("/api/upload", methods=["POST", "OPTIONS"])
 @require_access_code
 def upload_pdf():
     """Upload a PDF file and start conversion."""
@@ -276,7 +309,7 @@ def upload_pdf():
     return jsonify({"job_id": job_id, "status": "queued"}), 202
 
 
-@app.route("/api/status/<job_id>", methods=["GET"])
+@app.route("/api/status/<job_id>", methods=["GET", "OPTIONS"])
 @require_access_code
 def get_status(job_id: str):
     """Get the status and progress of a conversion job."""
@@ -295,10 +328,44 @@ def get_status(job_id: str):
         "estimated_duration": job["estimated_duration"],
         "metadata": job["metadata"],
         "output_filename": job["output_filename"],
+        "cloud_url": job.get("cloud_url"),
     })
 
 
-@app.route("/api/download/<job_id>", methods=["GET"])
+@app.route("/api/audiobooks", methods=["GET", "OPTIONS"])
+@require_access_code
+def list_audiobooks():
+    """List all previously generated audiobooks from Supabase and storage usage."""
+    if not AudiobookStorage.is_configured():
+        return jsonify({"audiobooks": [], "storage": None})  # No storage configured
+    try:
+        audiobooks = AudiobookStorage.list_audiobooks()
+        storage_usage = AudiobookStorage.get_storage_usage()
+        
+        return jsonify({
+            "audiobooks": audiobooks,
+            "storage": storage_usage
+        })
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route("/api/audiobooks/<audiobook_id>", methods=["DELETE", "OPTIONS"])
+@require_access_code
+def delete_audiobook(audiobook_id: str):
+    """Delete an audiobook from Supabase."""
+    if not AudiobookStorage.is_configured():
+        return jsonify({"error": "Storage not configured"}), 500
+    try:
+        success = AudiobookStorage.delete_audiobook(audiobook_id)
+        if success:
+            return jsonify({"deleted": True})
+        return jsonify({"error": "Audiobook-ul nu a fost găsit."}), 404
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route("/api/download/<job_id>", methods=["GET", "OPTIONS"])
 @require_access_code
 def download_file(job_id: str):
     """Download the generated audiobook MP3."""

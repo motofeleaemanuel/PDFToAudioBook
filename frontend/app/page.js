@@ -7,6 +7,7 @@ const API_BASE = rawApiUrl.endsWith("/api") ? rawApiUrl : `${rawApiUrl.replace(/
 
 export default function Home() {
   // ── Auth state ──────────────────────────────────
+  const [isInitializing, setIsInitializing] = useState(true);
   const [isAuthenticated, setIsAuthenticated] = useState(false);
   const [accessCode, setAccessCode] = useState("");
   const [authError, setAuthError] = useState(null);
@@ -22,6 +23,11 @@ export default function Home() {
   const [jobDetails, setJobDetails] = useState(null);
   const [error, setError] = useState(null);
 
+  // ── History state ──────────────────────────────────
+  const [audiobooks, setAudiobooks] = useState([]);
+  const [storageUsage, setStorageUsage] = useState(null);
+  const [loadingHistory, setLoadingHistory] = useState(false);
+
   const fileInputRef = useRef(null);
   const pollingRef = useRef(null);
   const storedCodeRef = useRef("");
@@ -33,7 +39,37 @@ export default function Home() {
       storedCodeRef.current = stored;
       setIsAuthenticated(true);
     }
+    setIsInitializing(false);
   }, []);
+
+  // ── Fetch audiobook history when authenticated ──
+  const fetchAudiobooks = useCallback(async () => {
+    setLoadingHistory(true);
+    try {
+      const response = await fetch(`${API_BASE}/audiobooks`, {
+        headers: { Authorization: `Bearer ${storedCodeRef.current}` },
+      });
+      if (response.ok) {
+        const data = await response.json();
+        // data looks like { audiobooks: [...], storage: { used_bytes: ..., percentage: ... } }
+        if (data.audiobooks) {
+          setAudiobooks(data.audiobooks);
+          setStorageUsage(data.storage);
+        } else {
+          // Fallback if old backend response
+          setAudiobooks(Array.isArray(data) ? data : []);
+        }
+      }
+    } catch {
+      // Silently fail — history is optional
+    } finally {
+      setLoadingHistory(false);
+    }
+  }, []);
+
+  useEffect(() => {
+    if (isAuthenticated) fetchAudiobooks();
+  }, [isAuthenticated, fetchAudiobooks]);
 
   // ── Auth headers helper ─────────────────────────
   const getAuthHeaders = useCallback(() => {
@@ -215,6 +251,7 @@ export default function Home() {
             clearInterval(pollingRef.current);
             pollingRef.current = null;
             setStatus("completed");
+            fetchAudiobooks(); // Refresh history immediately
           } else if (data.status === "error") {
             clearInterval(pollingRef.current);
             pollingRef.current = null;
@@ -226,11 +263,18 @@ export default function Home() {
         }
       }, 1500);
     },
-    [getAuthHeaders]
+    [getAuthHeaders, fetchAudiobooks]
   );
 
   const downloadAudiobook = useCallback(async () => {
     if (!jobId) return;
+    // If we have a cloud URL (Supabase), use that directly
+    const cloudUrl = jobDetails?.cloud_url;
+    if (cloudUrl) {
+      window.open(cloudUrl, "_blank");
+      return;
+    }
+    // Fallback: download from backend
     try {
       const response = await fetch(`${API_BASE}/download/${jobId}`, {
         headers: getAuthHeaders(),
@@ -249,6 +293,25 @@ export default function Home() {
       setError("Eroare la descărcare. Încearcă din nou.");
     }
   }, [jobId, jobDetails, getAuthHeaders]);
+
+  const deleteAudiobook = useCallback(
+    async (id) => {
+      try {
+        const response = await fetch(`${API_BASE}/audiobooks/${id}`, {
+          method: "DELETE",
+          headers: getAuthHeaders(),
+        });
+        if (response.ok) {
+          setAudiobooks((prev) => prev.filter((a) => a.id !== id));
+          // Refresh storage state after delete
+          fetchAudiobooks();
+        }
+      } catch {
+        // Silently fail
+      }
+    },
+    [getAuthHeaders, fetchAudiobooks]
+  );
 
   const resetAll = useCallback(() => {
     if (pollingRef.current) clearInterval(pollingRef.current);
@@ -270,6 +333,15 @@ export default function Home() {
   };
 
   const isProcessing = status === "uploading" || status === "processing";
+
+  // ── Render ──────────────────────────────────────
+  if (isInitializing) {
+    return (
+      <main className="app-container" style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', minHeight: '100vh' }}>
+        <div className="loader loop" style={{ width: '48px', height: '48px', borderWidth: '4px', borderTopColor: 'var(--accent-primary)' }}></div>
+      </main>
+    );
+  }
 
   // ── LOGIN SCREEN ─────────────────────────────────
   if (!isAuthenticated) {
@@ -333,7 +405,6 @@ export default function Home() {
     );
   }
 
-  // ── MAIN APP SCREEN ──────────────────────────────
   return (
     <main className="app-container">
       {/* Header */}
@@ -505,7 +576,93 @@ export default function Home() {
         )}
       </div>
 
-      {/* Footer */}
+      {/* Audiobook History */}
+      <div className="glass-card history-card">
+        <h2 className="history-title">📚 Audiobook-uri anterioare</h2>
+
+          {/* Storage usage bar */}
+          {storageUsage && (
+            <div className="storage-section">
+              <div className="storage-header">
+                <span className="storage-label">Spațiu în cloud</span>
+                <span className="storage-stats">
+                  {formatFileSize(storageUsage.used_bytes)} / 1 GB (
+                  {storageUsage.percentage}%)
+                </span>
+              </div>
+              <div className="progress-bar-track storage-track">
+                <div
+                  className={`progress-bar-fill storage-fill ${
+                    storageUsage.percentage > 90 ? "storage-critical" : ""
+                  }`}
+                  style={{ width: `${Math.min(100, storageUsage.percentage)}%` }}
+                />
+              </div>
+            </div>
+          )}
+
+          {loadingHistory ? (
+            <div className="history-empty" style={{ border: 'none' }}>
+              <div className="loader loop" style={{ width: '32px', height: '32px', marginBottom: '16px', borderTopColor: 'var(--accent-primary)' }}></div>
+              <p>Se încarcă istoricul...</p>
+            </div>
+          ) : audiobooks.length > 0 ? (
+            <div className="history-list">
+              {audiobooks.map((ab) => (
+                <div key={ab.id} className="history-item">
+                  <div className="history-item-info">
+                    <span className="history-item-icon">🎧</span>
+                    <div>
+                      <div className="history-item-name">
+                        {ab.original_name}
+                      </div>
+                      <div className="history-item-meta">
+                        {ab.total_pages > 0 && `${ab.total_pages} pag • `}
+                        {ab.duration_minutes > 0 &&
+                          `~${ab.duration_minutes} min • `}
+                        {ab.size_bytes > 0 &&
+                          `${(ab.size_bytes / (1024 * 1024)).toFixed(1)} MB • `}
+                        {ab.created_at &&
+                          new Date(ab.created_at).toLocaleDateString("ro-RO", {
+                            day: "numeric",
+                            month: "short",
+                            year: "numeric",
+                            hour: "2-digit",
+                            minute: "2-digit",
+                          })}
+                      </div>
+                    </div>
+                  </div>
+                  <div className="history-item-actions">
+                    <a
+                      href={ab.public_url}
+                      target="_blank"
+                      rel="noopener noreferrer"
+                      className="history-download-btn"
+                      title="Descarcă"
+                    >
+                      ⬇️
+                    </a>
+                    <button
+                      className="history-delete-btn"
+                      onClick={() => deleteAudiobook(ab.id)}
+                      title="Șterge"
+                    >
+                      🗑️
+                    </button>
+                  </div>
+                </div>
+              ))}
+            </div>
+          ) : (
+            <div className="history-empty">
+              <span className="history-empty-icon">📭</span>
+              <p>Nu ai salvat niciun audiobook încă.</p>
+              <p className="history-empty-sub">Încarcă un PDF mai sus pentru a începe.</p>
+            </div>
+          )}
+        </div>
+
       <footer className="footer">
         <p>
           Powered by PyMuPDF & OpenAI •{" "}
