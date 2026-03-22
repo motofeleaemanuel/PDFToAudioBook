@@ -1,0 +1,6 @@
+# Environment
+.env
+
+# Runtime data
+uploads/
+output/
