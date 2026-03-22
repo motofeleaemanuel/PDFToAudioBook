@@ -111,7 +111,7 @@ class TextRefiner:
                 # Fallback: use original chunk if refinement fails
                 return chunk
 
-        with concurrent.futures.ThreadPoolExecutor(max_workers=5) as executor:
+        with concurrent.futures.ThreadPoolExecutor(max_workers=2) as executor:
             future_to_index = {
                 executor.submit(process_chunk, chunk): i 
                 for i, chunk in enumerate(chunks)

@@ -218,8 +218,8 @@ class PDFExtractor:
                 ocr_text = cls._ocr_image_base64_with_vision(page_data["img_b64"])
                 return page_data["page_num"], ocr_text
 
-            # Execute concurrent requests
-            with concurrent.futures.ThreadPoolExecutor(max_workers=4) as executor:
+            # Execute concurrent requests with strict worker limit for Free Tier
+            with concurrent.futures.ThreadPoolExecutor(max_workers=2) as executor:
                 future_to_page = {executor.submit(process_ocr, p): p for p in ocr_tasks}
                 
                 for future in concurrent.futures.as_completed(future_to_page):
@@ -231,6 +231,9 @@ class PDFExtractor:
                             if len(ocr_text) > len(p["text"]):
                                 p["text"] = ocr_text
                                 p["is_ocr"] = True
+                            # Free base64 string immediately to save RAM
+                            if "img_b64" in p:
+                                del p["img_b64"]
                             break
 
                     completed_ocr += 1

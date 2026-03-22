@@ -125,8 +125,8 @@ class TTSEngine:
             sub_chunk = TextChunk(index=sub_info["chunk_obj"].index, text=sub_info["text"])
             return sub_info["sub_index"], sub_info["original_index"], cls.convert_chunk_to_bytes(sub_chunk)
 
-        # 2. Parallel processing
-        with concurrent.futures.ThreadPoolExecutor(max_workers=4) as executor:
+        # 2. Parallel processing with strict worker limit for Free Tier
+        with concurrent.futures.ThreadPoolExecutor(max_workers=2) as executor:
             future_to_info = {executor.submit(process_audio, info): info for info in flat_sub_chunks}
 
             for future in concurrent.futures.as_completed(future_to_info):
