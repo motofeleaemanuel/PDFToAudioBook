@@ -28,7 +28,7 @@ function ConversionJob({ job, onRemove, getAuthHeaders, fetchAudiobooks, API_BAS
       startConversion();
     }
     return () => {
-      if (pollingRef.current) clearInterval(pollingRef.current);
+      if (pollingRef.current) clearTimeout(pollingRef.current);
     };
   }, []);
 
@@ -67,53 +67,77 @@ function ConversionJob({ job, onRemove, getAuthHeaders, fetchAudiobooks, API_BAS
     }
   };
 
-  const startPolling = (id) => {
-    if (pollingRef.current) clearInterval(pollingRef.current);
+  const failCountRef = useRef(0);
+  const MAX_POLL_RETRIES = 4;
+  const POLL_INTERVAL = 5000;
 
-    pollingRef.current = setInterval(async () => {
+  const startPolling = (id) => {
+    if (pollingRef.current) clearTimeout(pollingRef.current);
+    failCountRef.current = 0;
+
+    const poll = async () => {
       try {
         const response = await fetch(`${API_BASE}/status/${id}`, {
           headers: getAuthHeaders(),
         });
 
-        if (response.status === 404) {
-          clearInterval(pollingRef.current);
-          pollingRef.current = null;
-          setStatus("error");
-          setError("Server repornit, job pierdut. Repetă încărcarea.");
-          return;
-        }
-
+        // Auth expired — fail immediately, no retry
         if (response.status === 401) {
-          clearInterval(pollingRef.current);
           pollingRef.current = null;
           setStatus("error");
           setError("Sesiune expirată. Reîncarcă pagina.");
           return;
         }
 
-        if (!response.ok) throw new Error("Eroare la verificarea stării.");
+        // Transient errors (404 during worker restart, 502, 503, etc.)
+        if (!response.ok) {
+          failCountRef.current += 1;
+          console.warn(`Polling failed (${response.status}), attempt ${failCountRef.current}/${MAX_POLL_RETRIES}`);
+          if (failCountRef.current >= MAX_POLL_RETRIES) {
+            pollingRef.current = null;
+            setStatus("error");
+            setError("Serverul nu răspunde. Verifică conexiunea și încearcă din nou.");
+            return;
+          }
+          pollingRef.current = setTimeout(poll, POLL_INTERVAL);
+          return;
+        }
 
+        // Success — reset failure counter
+        failCountRef.current = 0;
         const data = await response.json();
         setProgress(data.progress);
         setMessage(data.message);
         setJobDetails(data);
 
         if (data.status === "completed") {
-          clearInterval(pollingRef.current);
           pollingRef.current = null;
           setStatus("completed");
           fetchAudiobooks();
         } else if (data.status === "error") {
-          clearInterval(pollingRef.current);
           pollingRef.current = null;
           setStatus("error");
           setError(data.message);
+        } else {
+          // Still processing — schedule next poll
+          pollingRef.current = setTimeout(poll, POLL_INTERVAL);
         }
       } catch (err) {
-        console.error("Polling error:", err);
+        // Network error (Pi unreachable, Ngrok tunnel down, etc.)
+        failCountRef.current += 1;
+        console.warn(`Polling network error, attempt ${failCountRef.current}/${MAX_POLL_RETRIES}:`, err.message);
+        if (failCountRef.current >= MAX_POLL_RETRIES) {
+          pollingRef.current = null;
+          setStatus("error");
+          setError("Conexiune pierdută cu serverul. Verifică dacă Pi-ul este pornit.");
+          return;
+        }
+        pollingRef.current = setTimeout(poll, POLL_INTERVAL);
       }
-    }, 5000);
+    };
+
+    // Start first poll immediately
+    poll();
   };
 
   const downloadAudiobook = async () => {
@@ -495,12 +519,12 @@ export default function Home() {
       {/* Active Jobs Map */}
       <div className="active-jobs-container">
         {activeJobs.map(job => (
-          <ConversionJob 
-            key={job.id} 
-            job={job} 
-            onRemove={removeJob} 
-            getAuthHeaders={getAuthHeaders} 
-            fetchAudiobooks={fetchAudiobooks} 
+          <ConversionJob
+            key={job.id}
+            job={job}
+            onRemove={removeJob}
+            getAuthHeaders={getAuthHeaders}
+            fetchAudiobooks={fetchAudiobooks}
             API_BASE={API_BASE}
           />
         ))}
@@ -510,88 +534,87 @@ export default function Home() {
       <div className="glass-card history-card">
         <h2 className="history-title">📚 Audiobook-uri anterioare</h2>
 
-          {/* Storage usage bar */}
-          {storageUsage && (
-            <div className="storage-section">
-              <div className="storage-header">
-                <span className="storage-label">Spațiu în cloud</span>
-                <span className="storage-stats">
-                  {formatFileSize(storageUsage.used_bytes)} / 1 GB (
-                  {storageUsage.percentage}%)
-                </span>
-              </div>
-              <div className="progress-bar-track storage-track">
-                <div
-                  className={`progress-bar-fill storage-fill ${
-                    storageUsage.percentage > 90 ? "storage-critical" : ""
+        {/* Storage usage bar */}
+        {storageUsage && (
+          <div className="storage-section">
+            <div className="storage-header">
+              <span className="storage-label">Spațiu în cloud</span>
+              <span className="storage-stats">
+                {formatFileSize(storageUsage.used_bytes)} / 1 GB (
+                {storageUsage.percentage}%)
+              </span>
+            </div>
+            <div className="progress-bar-track storage-track">
+              <div
+                className={`progress-bar-fill storage-fill ${storageUsage.percentage > 90 ? "storage-critical" : ""
                   }`}
-                  style={{ width: `${Math.min(100, storageUsage.percentage)}%` }}
-                />
-              </div>
+                style={{ width: `${Math.min(100, storageUsage.percentage)}%` }}
+              />
             </div>
-          )}
+          </div>
+        )}
 
-          {loadingHistory ? (
-            <div className="history-empty" style={{ border: 'none' }}>
-              <div className="loader loop" style={{ width: '32px', height: '32px', marginBottom: '16px', borderTopColor: 'var(--accent-primary)' }}></div>
-              <p>Se încarcă istoricul...</p>
-            </div>
-          ) : audiobooks.length > 0 ? (
-            <div className="history-list">
-              {audiobooks.map((ab) => (
-                <div key={ab.id} className="history-item">
-                  <div className="history-item-info">
-                    <span className="history-item-icon">🎧</span>
-                    <div>
-                      <div className="history-item-name">
-                        {ab.original_name}
-                      </div>
-                      <div className="history-item-meta">
-                        {ab.total_pages > 0 && `${ab.total_pages} pag • `}
-                        {ab.duration_minutes > 0 &&
-                          `~${ab.duration_minutes} min • `}
-                        {ab.size_bytes > 0 &&
-                          `${(ab.size_bytes / (1024 * 1024)).toFixed(1)} MB • `}
-                        {ab.created_at &&
-                          new Date(ab.created_at).toLocaleDateString("ro-RO", {
-                            day: "numeric",
-                            month: "short",
-                            year: "numeric",
-                            hour: "2-digit",
-                            minute: "2-digit",
-                          })}
-                      </div>
+        {loadingHistory ? (
+          <div className="history-empty" style={{ border: 'none' }}>
+            <div className="loader loop" style={{ width: '32px', height: '32px', marginBottom: '16px', borderTopColor: 'var(--accent-primary)' }}></div>
+            <p>Se încarcă istoricul...</p>
+          </div>
+        ) : audiobooks.length > 0 ? (
+          <div className="history-list">
+            {audiobooks.map((ab) => (
+              <div key={ab.id} className="history-item">
+                <div className="history-item-info">
+                  <span className="history-item-icon">🎧</span>
+                  <div>
+                    <div className="history-item-name">
+                      {ab.original_name}
+                    </div>
+                    <div className="history-item-meta">
+                      {ab.total_pages > 0 && `${ab.total_pages} pag • `}
+                      {ab.duration_minutes > 0 &&
+                        `~${ab.duration_minutes} min • `}
+                      {ab.size_bytes > 0 &&
+                        `${(ab.size_bytes / (1024 * 1024)).toFixed(1)} MB • `}
+                      {ab.created_at &&
+                        new Date(ab.created_at).toLocaleDateString("ro-RO", {
+                          day: "numeric",
+                          month: "short",
+                          year: "numeric",
+                          hour: "2-digit",
+                          minute: "2-digit",
+                        })}
                     </div>
                   </div>
-                  <div className="history-item-actions">
-                    <a
-                      href={ab.public_url}
-                      target="_blank"
-                      rel="noopener noreferrer"
-                      className="history-download-btn"
-                      title="Descarcă"
-                    >
-                      ⬇️
-                    </a>
-                    <button
-                      className="history-delete-btn"
-                      onClick={() => deleteAudiobook(ab.id)}
-                      title="Șterge"
-                    >
-                      🗑️
-                    </button>
-                  </div>
                 </div>
-              ))}
-            </div>
-          ) : (
-            <div className="history-empty">
-              <span className="history-empty-icon">📭</span>
-              <p>Nu ai salvat niciun audiobook încă.</p>
-              <p className="history-empty-sub">Încarcă un PDF mai sus pentru a începe.</p>
-            </div>
-          )}
-        </div>
+                <div className="history-item-actions">
+                  <a
+                    href={ab.public_url}
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    className="history-download-btn"
+                    title="Descarcă"
+                  >
+                    ⬇️
+                  </a>
+                  <button
+                    className="history-delete-btn"
+                    onClick={() => deleteAudiobook(ab.id)}
+                    title="Șterge"
+                  >
+                    🗑️
+                  </button>
+                </div>
+              </div>
+            ))}
+          </div>
+        ) : (
+          <div className="history-empty">
+            <span className="history-empty-icon">📭</span>
+            <p>Nu ai salvat niciun audiobook încă.</p>
+            <p className="history-empty-sub">Încarcă un PDF mai sus pentru a începe.</p>
+          </div>
+        )}
+      </div>
 
       <footer className="footer">
         <p>
