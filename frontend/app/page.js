@@ -247,7 +247,7 @@ export default function Home() {
     setLoadingHistory(true);
     try {
       const response = await fetch(`${API_BASE}/audiobooks`, {
-        headers: { Authorization: `Bearer ${storedCodeRef.current}` },
+        headers: { Authorization: `Bearer ${storedCodeRef.current}`, "ngrok-skip-browser-warning": "1" },
       });
       if (response.ok) {
         const data = await response.json();
@@ -273,7 +273,7 @@ export default function Home() {
 
   // ── Auth headers helper ─────────────────────────
   const getAuthHeaders = useCallback(() => {
-    return { Authorization: `Bearer ${storedCodeRef.current}` };
+    return { Authorization: `Bearer ${storedCodeRef.current}`, "ngrok-skip-browser-warning": "1" };
   }, []);
 
   // ── Login ───────────────────────────────────────
@@ -286,7 +286,7 @@ export default function Home() {
       try {
         const response = await fetch(`${API_BASE}/verify`, {
           method: "POST",
-          headers: { "Content-Type": "application/json" },
+          headers: { "Content-Type": "application/json", "ngrok-skip-browser-warning": "1" },
           body: JSON.stringify({ code: accessCode }),
         });
 
