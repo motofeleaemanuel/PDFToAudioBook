@@ -8,6 +8,7 @@ import io
 import concurrent.futures
 from typing import List, Optional, Callable
 from openai import OpenAI
+from openai_limiter import with_rate_limit
 
 from text_processor import TextChunk
 
@@ -39,6 +40,7 @@ class TTSEngine:
         return cls._client
 
     @classmethod
+    @with_rate_limit
     def convert_chunk_to_bytes(cls, chunk: TextChunk) -> bytes:
         """Convert a single text chunk to MP3 bytes using OpenAI TTS."""
         client = cls._get_client()

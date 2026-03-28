@@ -37,6 +37,9 @@ keepalive = 5
 # ─── Memory Guard ───────────────────────────────────────────────
 # Restart the worker after this many requests to prevent slow memory leaks
 # (PyMuPDF, OpenAI SDK, etc.). On a 2GB device this is critical.
+# SAFE: Job state is now persisted in SQLite — worker restarts do not
+# destroy active jobs. Background threads will continue in-process,
+# but new requests after restart will still see all job progress.
 max_requests = 200
 max_requests_jitter = 30
 

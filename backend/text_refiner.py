@@ -8,6 +8,7 @@ import os
 import concurrent.futures
 from typing import List, Optional, Callable
 from openai import OpenAI
+from openai_limiter import with_rate_limit
 
 from text_processor import TextChunk
 
@@ -60,24 +61,24 @@ class TextRefiner:
         Refine a single text chunk using GPT.
         Returns a new TextChunk with refined text.
         """
-        client = cls._get_client()
+        refined_text = cls._call_refinement_api(chunk.text, len(chunk.text) * 2)
+        return TextChunk(index=chunk.index, text=refined_text)
 
+    @classmethod
+    @with_rate_limit
+    def _call_refinement_api(cls, text: str, max_tokens: int) -> str:
+        """Rate-limited GPT refinement call."""
+        client = cls._get_client()
         response = client.chat.completions.create(
             model=cls.MODEL,
             messages=[
                 {"role": "system", "content": SYSTEM_PROMPT},
-                {"role": "user", "content": chunk.text}
+                {"role": "user", "content": text}
             ],
-            temperature=0.3,  # Low temp for faithful refinement
-            max_tokens=len(chunk.text) * 2,  # Allow some expansion
+            temperature=0.3,
+            max_tokens=max_tokens,
         )
-
-        refined_text = response.choices[0].message.content.strip()
-
-        return TextChunk(
-            index=chunk.index,
-            text=refined_text
-        )
+        return response.choices[0].message.content.strip()
 
     @classmethod
     def refine_all(

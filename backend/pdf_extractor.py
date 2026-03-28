@@ -12,6 +12,7 @@ import concurrent.futures
 from dataclasses import dataclass, field
 from typing import List, Optional, Callable
 from openai import OpenAI
+from openai_limiter import with_rate_limit
 
 
 # Minimum characters threshold: if a page has fewer than this many chars,
@@ -92,35 +93,37 @@ class PDFExtractor:
             Extracted text from the image
         """
         try:
-            client = cls._get_client()
-
-            # Send to GPT-4o Vision
-            response = client.chat.completions.create(
-                model="gpt-4o",
-                messages=[
-                    {
-                        "role": "user",
-                        "content": [
-                            {"type": "text", "text": VISION_OCR_PROMPT},
-                            {
-                                "type": "image_url",
-                                "image_url": {
-                                    "url": f"data:image/png;base64,{img_b64}",
-                                    "detail": "high"
-                                }
-                            }
-                        ]
-                    }
-                ],
-                max_tokens=4096,
-                temperature=0.1,
-            )
-
-            return response.choices[0].message.content.strip()
-
+            return cls._call_vision_api(img_b64)
         except Exception as e:
             print(f"  OpenAI Vision OCR eroare: {e}")
             return ""
+
+    @classmethod
+    @with_rate_limit
+    def _call_vision_api(cls, img_b64: str) -> str:
+        """Rate-limited Vision API call."""
+        client = cls._get_client()
+        response = client.chat.completions.create(
+            model="gpt-4o",
+            messages=[
+                {
+                    "role": "user",
+                    "content": [
+                        {"type": "text", "text": VISION_OCR_PROMPT},
+                        {
+                            "type": "image_url",
+                            "image_url": {
+                                "url": f"data:image/png;base64,{img_b64}",
+                                "detail": "high"
+                            }
+                        }
+                    ]
+                }
+            ],
+            max_tokens=4096,
+            temperature=0.1,
+        )
+        return response.choices[0].message.content.strip()
 
     @classmethod
     def extract(

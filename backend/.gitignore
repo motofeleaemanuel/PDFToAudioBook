@@ -4,3 +4,6 @@
 # Runtime data
 uploads/
 output/
+jobs.db
+jobs.db-wal
+jobs.db-shm

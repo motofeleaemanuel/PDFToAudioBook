@@ -23,6 +23,7 @@ from text_processor import TextProcessor
 from text_refiner import TextRefiner
 from tts_engine import TTSEngine
 from storage import AudiobookStorage
+from job_store import JobStore
 
 # ── App Setup ──────────────────────────────────────────────────
 app = Flask(__name__)
@@ -52,8 +53,8 @@ RATE_LIMIT_MAX = int(os.getenv("RATE_LIMIT_MAX", "20"))
 RATE_LIMIT_WINDOW = 3600  # 1 hour in seconds
 rate_limit_store = defaultdict(list)  # IP -> [timestamps]
 
-# In-memory job store
-jobs = {}
+# Persistent job store (survives Gunicorn worker restarts)
+job_store = JobStore()
 
 
 # ── Rate Limiting ──────────────────────────────────────────────
@@ -97,36 +98,36 @@ def require_access_code(f):
 # ── Job Processing ─────────────────────────────────────────────
 def process_pdf_job(job_id: str, pdf_path: str, original_filename: str):
     """Background task: extract text → process → refine → TTS → MP3."""
-    job = jobs[job_id]
 
     try:
         # Phase 1: Extract text (0-15%)
-        job["status"] = "extracting"
-        job["message"] = "Extrag textul din PDF..."
+        job_store.update(job_id, status="extracting", message="Extrag textul din PDF...")
 
         def on_extract_progress(current, total, message=""):
-            job["progress"] = int((current / total) * 15)
-            job["message"] = message or f"Extrag pagina {current} din {total}..."
+            job_store.update(
+                job_id,
+                progress=int((current / total) * 15),
+                message=message or f"Extrag pagina {current} din {total}...",
+            )
 
         content = PDFExtractor.extract(pdf_path, progress_callback=on_extract_progress)
-        job["total_pages"] = content.total_pages
-        job["metadata"] = content.metadata
-        job["ocr_pages"] = content.ocr_pages_count
+        job_store.update(
+            job_id,
+            total_pages=content.total_pages,
+            metadata=content.metadata,
+            ocr_pages=content.ocr_pages_count,
+        )
 
         if not content.full_text.strip():
-            job["status"] = "error"
-            job["message"] = "PDF-ul nu conține text extractibil (nici prin OCR)."
+            job_store.update(job_id, status="error", message="PDF-ul nu conține text extractibil (nici prin OCR).")
             return
 
         # Phase 2: Clean text & save to file (15-20%)
-        job["status"] = "processing"
-        job["progress"] = 18
-        job["message"] = "Procesez și curăț textul..."
+        job_store.update(job_id, status="processing", progress=18, message="Procesez și curăț textul...")
         chunks = TextProcessor.process(content.full_text)
 
         if not chunks:
-            job["status"] = "error"
-            job["message"] = "Nu am putut extrage text util din PDF."
+            job_store.update(job_id, status="error", message="Nu am putut extrage text util din PDF.")
             return
 
         # Save extracted text to file for reference
@@ -137,22 +138,25 @@ def process_pdf_job(job_id: str, pdf_path: str, original_filename: str):
             f.write(f"=== Pagini: {content.total_pages}, OCR: {content.ocr_pages_count} ===\n\n")
             for chunk in chunks:
                 f.write(chunk.text + "\n\n")
-        job["text_file"] = text_file_path
+        job_store.update(job_id, text_file=text_file_path)
         print(f"  Text salvat: {text_file_path}")
 
         # Phase 3: LLM Refinement (20-45%)
-        job["status"] = "refining"
-        job["progress"] = 20
-        job["message"] = "Rafinare AI — verific fluența textului..."
+        job_store.update(job_id, status="refining", progress=20, message="Rafinare AI — verific fluența textului...")
 
         def on_refine_progress(current, total, message):
-            refine_progress = int(20 + (current / total) * 25)
-            job["progress"] = refine_progress
-            job["message"] = message
+            job_store.update(
+                job_id,
+                progress=int(20 + (current / total) * 25),
+                message=message,
+            )
 
         chunks = TextRefiner.refine_all(chunks, progress_callback=on_refine_progress)
-        job["total_chunks"] = len(chunks)
-        job["estimated_duration"] = round(TTSEngine.get_estimated_duration(chunks), 1)
+        job_store.update(
+            job_id,
+            total_chunks=len(chunks),
+            estimated_duration=round(TTSEngine.get_estimated_duration(chunks), 1),
+        )
 
         # Save refined text too
         refined_text_path = os.path.join(OUTPUT_DIR, f"{job_id}_refined.txt")
@@ -163,28 +167,30 @@ def process_pdf_job(job_id: str, pdf_path: str, original_filename: str):
         print(f"  Text rafinat salvat: {refined_text_path}")
 
         # Phase 4: TTS Conversion (45-95%)
-        job["status"] = "converting"
-        job["progress"] = 45
+        job_store.update(job_id, status="converting", progress=45)
 
         output_filename = f"{base_name}_audiobook.mp3"
         output_path = os.path.join(OUTPUT_DIR, f"{job_id}.mp3")
 
         def on_tts_progress(current, total, message):
-            tts_progress = int(45 + (current / total) * 50)
-            job["progress"] = tts_progress
-            job["message"] = message
-            job["current_chunk"] = current
+            job_store.update(
+                job_id,
+                progress=int(45 + (current / total) * 50),
+                message=message,
+                current_chunk=current,
+            )
 
         TTSEngine.convert_to_audiobook(
             chunks,
             output_path,
-            progress_callback=on_tts_progress
+            progress_callback=on_tts_progress,
         )
 
         # Phase 5: Upload to Supabase (95-100%)
-        job["status"] = "uploading_cloud"
-        job["progress"] = 96
-        job["message"] = "Salvez audiobook-ul în cloud..."
+        job_store.update(job_id, status="uploading_cloud", progress=96, message="Salvez audiobook-ul în cloud...")
+
+        # Read current job state for Supabase upload metadata
+        current_job = job_store.get(job_id) or {}
 
         if AudiobookStorage.is_configured():
             try:
@@ -194,16 +200,20 @@ def process_pdf_job(job_id: str, pdf_path: str, original_filename: str):
                 metadata = AudiobookStorage.upload_audiobook_chunked(
                     local_path=output_path,
                     original_name=original_filename,
-                    duration_minutes=job["estimated_duration"],
-                    total_pages=job["total_pages"],
+                    duration_minutes=current_job.get("estimated_duration", 0),
+                    total_pages=current_job.get("total_pages", 0),
                 )
-                job["cloud_url"] = metadata.get("public_url", "")
-                job["audiobook_id"] = metadata.get("id", "")
+                cloud_url = metadata.get("public_url", "")
+                job_store.update(
+                    job_id,
+                    cloud_url=cloud_url,
+                    audiobook_id=metadata.get("id", ""),
+                )
                 parts = metadata.get("parts")
                 if parts and parts > 1:
                     print(f"  ✅ Supabase upload OK — {parts} părți uploadate")
                 else:
-                    print(f"  ✅ Supabase upload OK — cloud_url: {job['cloud_url']}")
+                    print(f"  ✅ Supabase upload OK — cloud_url: {cloud_url}")
             except Exception as e:
                 import traceback
                 print(f"  ⚠️ Supabase upload failed: {e}")
@@ -213,15 +223,17 @@ def process_pdf_job(job_id: str, pdf_path: str, original_filename: str):
             print("  ⚠️ Supabase not configured — keeping file local only")
 
         # Done!
-        job["status"] = "completed"
-        job["progress"] = 100
-        job["message"] = "Audiobook-ul este gata!"
-        job["output_path"] = output_path
-        job["output_filename"] = output_filename
+        job_store.update(
+            job_id,
+            status="completed",
+            progress=100,
+            message="Audiobook-ul este gata!",
+            output_path=output_path,
+            output_filename=output_filename,
+        )
 
     except Exception as e:
-        job["status"] = "error"
-        job["message"] = f"Eroare: {str(e)}"
+        job_store.update(job_id, status="error", message=f"Eroare: {str(e)}")
         print(f"Job {job_id} error: {e}")
 
     finally:
@@ -238,6 +250,8 @@ def process_pdf_job(job_id: str, pdf_path: str, original_filename: str):
                 pass
         # NOTE: MP3 is kept locally until downloaded, then cleaned up
         #       by the /api/download endpoint
+        # Periodically clean up old finished jobs from the database
+        job_store.cleanup_old()
 
 
 # ── API Routes ─────────────────────────────────────────────────
@@ -292,8 +306,8 @@ def upload_pdf():
     # Record for rate limiting
     record_request(client_ip)
 
-    # Create job entry
-    jobs[job_id] = {
+    # Create job entry (persisted to SQLite)
+    job_store.create(job_id, {
         "id": job_id,
         "status": "queued",
         "progress": 0,
@@ -307,7 +321,7 @@ def upload_pdf():
         "ocr_pages": 0,
         "output_path": None,
         "output_filename": None,
-    }
+    })
 
     # Start background processing
     thread = threading.Thread(
@@ -324,10 +338,10 @@ def upload_pdf():
 @require_access_code
 def get_status(job_id: str):
     """Get the status and progress of a conversion job."""
-    if job_id not in jobs:
+    job = job_store.get(job_id)
+    if not job:
         return jsonify({"error": "Job-ul nu a fost găsit."}), 404
 
-    job = jobs[job_id]
     return jsonify({
         "id": job["id"],
         "status": job["status"],
@@ -380,10 +394,10 @@ def delete_audiobook(audiobook_id: str):
 @require_access_code
 def download_file(job_id: str):
     """Download the generated audiobook MP3."""
-    if job_id not in jobs:
+    job = job_store.get(job_id)
+    if not job:
         return jsonify({"error": "Job-ul nu a fost găsit."}), 404
 
-    job = jobs[job_id]
     if job["status"] != "completed":
         return jsonify({"error": "Conversia nu este finalizată încă."}), 400
 
