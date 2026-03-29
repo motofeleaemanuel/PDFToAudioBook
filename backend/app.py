@@ -56,6 +56,10 @@ rate_limit_store = defaultdict(list)  # IP -> [timestamps]
 # Persistent job store (survives Gunicorn worker restarts)
 job_store = JobStore()
 
+# ── Caching for Supabase Auth ────────────────────────────────────
+_AUTH_CACHE = {}  # token -> (user_id, timestamp)
+_AUTH_CACHE_TTL = 300  # 5 minutes
+
 
 # ── Rate Limiting ──────────────────────────────────────────────
 def get_client_ip():
@@ -106,13 +110,31 @@ def require_auth(f):
             
         token = auth_header.replace("Bearer ", "")
 
-        # Use Supabase Auth API to verify JWT
+        # 1. Check local cache first to avoid slow network requests on every poll
+        now = time.time()
+        if token in _AUTH_CACHE:
+            user_id, timestamp = _AUTH_CACHE[token]
+            if now - timestamp < _AUTH_CACHE_TTL:
+                g.user_id = user_id
+                return f(*args, **kwargs)
+
+        # 2. Cache miss -> Use Supabase Auth API to verify JWT
         if AudiobookStorage.is_configured():
             try:
                 client = AudiobookStorage._get_client()
                 user_res = client.auth.get_user(token)
                 if user_res and user_res.user:
                     g.user_id = user_res.user.id
+                    
+                    # Store in cache
+                    _AUTH_CACHE[token] = (g.user_id, now)
+                    
+                    # Simplistic cleanup
+                    if len(_AUTH_CACHE) > 1000:
+                        keys_to_delete = [k for k, v in _AUTH_CACHE.items() if now - v[1] > _AUTH_CACHE_TTL]
+                        for k in keys_to_delete:
+                            _AUTH_CACHE.pop(k, None)
+                            
                     return f(*args, **kwargs)
             except Exception as e:
                 import traceback

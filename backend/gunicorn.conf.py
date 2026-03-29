@@ -9,7 +9,7 @@ workers = 1
 # 4 threads is ideal for the 4-core ARM Cortex-A72:
 #   - 1 thread handles the current conversion job (mostly I/O-blocked on OpenAI)
 #   - remaining threads handle /api/status polling, /api/health, /api/upload, etc.
-threads = 4
+threads = 16
 
 # ─── Worker Class ───────────────────────────────────────────────
 # gthread (threaded) is the correct choice:
@@ -37,11 +37,10 @@ keepalive = 5
 # ─── Memory Guard ───────────────────────────────────────────────
 # Restart the worker after this many requests to prevent slow memory leaks
 # (PyMuPDF, OpenAI SDK, etc.). On a 2GB device this is critical.
-# SAFE: Job state is now persisted in SQLite — worker restarts do not
-# destroy active jobs. Background threads will continue in-process,
-# but new requests after restart will still see all job progress.
-max_requests = 200
-max_requests_jitter = 30
+# FATAL FLAW FIX: max_requests kills the process, which kills OS threading.Thread
+# running in the background. Do NOT restart the worker while relying on Threads.
+max_requests = 0
+max_requests_jitter = 0
 
 # ─── Preloading ─────────────────────────────────────────────────
 # Do NOT preload — preloading loads app in master process, but threads

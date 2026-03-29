@@ -7,7 +7,7 @@ const rawApiUrl = process.env.NEXT_PUBLIC_API_URL || "http://localhost:5000/api"
 const API_BASE = rawApiUrl.endsWith("/api") ? rawApiUrl : `${rawApiUrl.replace(/\/$/, "")}/api`;
 
 const POLL_INTERVAL = 5000;
-const MAX_POLL_RETRIES = 4;
+const MAX_POLL_RETRIES = 12;
 
 const JobContext = createContext(null);
 
@@ -64,13 +64,23 @@ export function JobProvider({ children }) {
           headers: await getAuthHeaders(),
         });
 
+        // True 404 = job genuinely doesn't exist in backend → fatal
+        if (response.status === 404) {
+          updateJob(localId, { status: "error", error: "Job not found on server." });
+          return;
+        }
+
+        // Transient errors (401 DNS fail, 502/503 Gunicorn restart, etc.) → retry
         if (!response.ok) {
           failCounts.current[localId] = (failCounts.current[localId] || 0) + 1;
+          console.warn(`Poll ${backendJobId}: HTTP ${response.status}, attempt ${failCounts.current[localId]}/${MAX_POLL_RETRIES}`);
           if (failCounts.current[localId] >= MAX_POLL_RETRIES) {
             updateJob(localId, { status: "error", error: "Server stopped responding." });
             return;
           }
-          pollTimers.current[localId] = setTimeout(poll, POLL_INTERVAL);
+          // Exponential backoff: 5s, 10s, 15s...
+          const backoff = POLL_INTERVAL * (1 + failCounts.current[localId] * 0.5);
+          pollTimers.current[localId] = setTimeout(poll, backoff);
           return;
         }
 
@@ -100,11 +110,13 @@ export function JobProvider({ children }) {
         }
       } catch (err) {
         failCounts.current[localId] = (failCounts.current[localId] || 0) + 1;
+        console.warn(`Poll ${backendJobId}: network error, attempt ${failCounts.current[localId]}/${MAX_POLL_RETRIES}`);
         if (failCounts.current[localId] >= MAX_POLL_RETRIES) {
           updateJob(localId, { status: "error", error: "Network connection lost." });
           return;
         }
-        pollTimers.current[localId] = setTimeout(poll, POLL_INTERVAL);
+        const backoff = POLL_INTERVAL * (1 + failCounts.current[localId] * 0.5);
+        pollTimers.current[localId] = setTimeout(poll, backoff);
       }
     };
     poll();
