@@ -40,6 +40,13 @@ export async function updateSession(request) {
     return NextResponse.redirect(url);
   }
 
+  // Intercept the root path "/" specifically
+  if (request.nextUrl.pathname === "/") {
+    const url = request.nextUrl.clone();
+    url.pathname = user ? "/dashboard" : "/login";
+    return NextResponse.redirect(url);
+  }
+
   // If user is authenticated and on login/signup pages, redirect to dashboard
   if (
     user &&
