@@ -33,7 +33,6 @@
     "eslint": "^9",
     "eslint-config-next": "16.2.1",
     "lightningcss": "^1.32.0",
-    "lightningcss-win32-x64-msvc": "^1.32.0",
     "postcss": "^8.5.8",
     "tailwindcss": "^4.2.2"
   }
