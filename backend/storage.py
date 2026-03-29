@@ -44,6 +44,7 @@ class AudiobookStorage:
         original_name: str,
         duration_minutes: float = 0,
         total_pages: int = 0,
+        user_id: str = None,
     ) -> Dict:
         """
         Upload an MP3 file to Supabase Storage and save metadata.
@@ -53,6 +54,7 @@ class AudiobookStorage:
             original_name: Original PDF filename (used for display)
             duration_minutes: Estimated audio duration
             total_pages: Number of pages in the source PDF
+            user_id: Supabase user ID for ownership
 
         Returns:
             Dict with audiobook metadata including download URL
@@ -92,6 +94,9 @@ class AudiobookStorage:
             "total_pages": total_pages,
             "public_url": public_url,
         }
+
+        if user_id and user_id != "legacy":
+            metadata["user_id"] = user_id
 
         client.table(cls.TABLE_NAME).insert(metadata).execute()
 
