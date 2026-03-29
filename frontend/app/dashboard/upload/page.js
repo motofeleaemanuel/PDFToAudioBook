@@ -1,7 +1,8 @@
 "use client";
 
 import { useState, useRef, useCallback } from "react";
-import { UploadCloud, FileText, CheckCircle2, AlertCircle, Loader2, Download, Trash2, InfoIcon, Play } from "lucide-react";
+import Link from "next/link";
+import { UploadCloud, FileText, CheckCircle2, AlertCircle, Loader2, Download, Trash2, InfoIcon, Play, ExternalLink } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import { getAuthHeaders } from "@/lib/api-auth";
@@ -52,6 +53,7 @@ function ConversionJobCard({ job, onStart, onCancel, onRemove, hasCredits = true
   const { status, progress, message, error, details: jobDetails, jobId } = job;
 
   const downloadAudiobook = () => {
+
     // Use the Supabase cloud URL directly (fast CDN) instead of proxying through the Pi
     const cloudUrl = jobDetails?.cloud_url;
     if (cloudUrl) {
@@ -181,7 +183,18 @@ function ConversionJobCard({ job, onStart, onCancel, onRemove, hasCredits = true
               </Button>
             )}
 
-            {status === "completed" && (
+            {status === "completed" && (jobDetails?.cloud_urls?.length > 1 ? (
+              <Button 
+                asChild
+                size="sm"
+                className="bg-blue-600 hover:bg-blue-500 text-white shadow-lg shadow-blue-900/50 transition-colors h-9 px-4"
+              >
+                <Link href="/dashboard/audiobooks">
+                  <ExternalLink className="mr-1.5 h-3.5 w-3.5" />
+                  View All Parts
+                </Link>
+              </Button>
+            ) : (
               <Button 
                 onClick={downloadAudiobook} 
                 size="sm"
@@ -190,7 +203,7 @@ function ConversionJobCard({ job, onStart, onCancel, onRemove, hasCredits = true
                 <Download className="mr-1.5 h-3.5 w-3.5" />
                 Download
               </Button>
-            )}
+            ))}
 
             {/* Trash Button for all states except processing */}
             {status !== "uploading" && status !== "processing" && (
