@@ -46,33 +46,21 @@ function formatFileSize(bytes) {
 }
 
 function ConversionJobCard({ job, onStart, onCancel, onRemove, hasCredits = true }) {
-  const [isDownloading, setIsDownloading] = useState(false);
   const [showCancelDialog, setShowCancelDialog] = useState(false);
   const [isCancelling, setIsCancelling] = useState(false);
 
   const { status, progress, message, error, details: jobDetails, jobId } = job;
 
-  const downloadAudiobook = async () => {
-    if (!jobId || isDownloading) return;
-    setIsDownloading(true);
-    try {
-      const response = await fetch(`${API_BASE}/download/${jobId}`, {
-        headers: await getAuthHeaders(),
-      });
-      if (!response.ok) throw new Error("Download failed");
-      const blob = await response.blob();
-      const url = window.URL.createObjectURL(blob);
-      const a = document.createElement("a");
-      a.href = url;
-      a.download = jobDetails?.output_filename || "audiobook.mp3";
-      document.body.appendChild(a);
-      a.click();
-      document.body.removeChild(a);
-      window.URL.revokeObjectURL(url);
-    } catch (err) {
-      // could set local error state here
-    } finally {
-      setIsDownloading(false);
+  const downloadAudiobook = () => {
+    // Use the Supabase cloud URL directly (fast CDN) instead of proxying through the Pi
+    const cloudUrl = jobDetails?.cloud_url;
+    if (cloudUrl) {
+      window.open(cloudUrl, "_blank");
+      return;
+    }
+    // Fallback: proxy through backend (slow, but works if cloud_url is missing)
+    if (jobId) {
+      window.open(`${API_BASE}/download/${jobId}`, "_blank");
     }
   };
 
@@ -196,11 +184,10 @@ function ConversionJobCard({ job, onStart, onCancel, onRemove, hasCredits = true
             {status === "completed" && (
               <Button 
                 onClick={downloadAudiobook} 
-                disabled={isDownloading} 
                 size="sm"
                 className="bg-green-600 hover:bg-green-500 text-white shadow-lg shadow-green-900/50 transition-colors h-9 px-4"
               >
-                {isDownloading ? <Loader2 className="mr-1.5 h-3.5 w-3.5 animate-spin" /> : <Download className="mr-1.5 h-3.5 w-3.5" />}
+                <Download className="mr-1.5 h-3.5 w-3.5" />
                 Download
               </Button>
             )}
