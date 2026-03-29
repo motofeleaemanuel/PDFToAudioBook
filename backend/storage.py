@@ -107,6 +107,7 @@ class AudiobookStorage:
         original_name: str,
         duration_minutes: float = 0,
         total_pages: int = 0,
+        user_id: str = None,
     ) -> Dict:
         """
         Smart upload: if file <= 45MB, upload normally.
@@ -122,6 +123,7 @@ class AudiobookStorage:
                 original_name=original_name,
                 duration_minutes=duration_minutes,
                 total_pages=total_pages,
+                user_id=user_id,
             )
 
         # Large file — split and upload parts
@@ -169,6 +171,9 @@ class AudiobookStorage:
                     "total_pages": total_pages if part_num == 1 else 0,
                     "public_url": public_url,
                 }
+                
+                if user_id and user_id != "legacy":
+                    metadata["user_id"] = user_id
 
                 client.table(cls.TABLE_NAME).insert(metadata).execute()
                 total_uploaded += chunk_size
@@ -182,32 +187,30 @@ class AudiobookStorage:
         }
 
     @classmethod
-    def list_audiobooks(cls) -> List[Dict]:
+    def list_audiobooks(cls, user_id: str = None) -> List[Dict]:
         """List all audiobooks, newest first."""
-        client = cls._get_client()
+        if not user_id or user_id == "legacy":
+            return []
 
-        response = (
-            client.table(cls.TABLE_NAME)
-            .select("*")
-            .order("created_at", desc=True)
-            .execute()
-        )
+        client = cls._get_client()
+        query = client.table(cls.TABLE_NAME).select("*").eq("user_id", user_id)
+            
+        response = query.order("created_at", desc=True).execute()
 
         return response.data or []
 
     @classmethod
-    def get_storage_usage(cls) -> Dict:
+    def get_storage_usage(cls, user_id: str = None) -> Dict:
         """Calculate total storage used (in bytes) and percentage out of 1GB."""
+        if not user_id or user_id == "legacy":
+            return {"used_bytes": 0, "limit_bytes": 1024 * 1024 * 1024, "percentage": 0}
+
         client = cls._get_client()
-        
-        response = (
-            client.table(cls.TABLE_NAME)
-            .select("size_bytes")
-            .execute()
-        )
+        query = client.table(cls.TABLE_NAME).select("size_bytes").eq("user_id", user_id)
+        response = query.execute()
         
         total_bytes = sum(item.get("size_bytes", 0) for item in response.data or [])
-        limit_bytes = 1000 * 1024 * 1024  # 1GB in bytes (Supabase free tier limit)
+        limit_bytes = 1024 * 1024 * 1024  # 1GB true GiB limit to trigger GB formatting
         
         return {
             "used_bytes": total_bytes,
@@ -216,14 +219,18 @@ class AudiobookStorage:
         }
 
     @classmethod
-    def get_audiobook(cls, audiobook_id: str) -> Optional[Dict]:
-        """Get a single audiobook by ID."""
+    def get_audiobook(cls, audiobook_id: str, user_id: Optional[str] = None) -> Optional[Dict]:
+        """Get a single audiobook by ID and owner."""
+        if not user_id or user_id == "legacy":
+            return None
+
         client = cls._get_client()
 
         response = (
             client.table(cls.TABLE_NAME)
             .select("*")
             .eq("id", audiobook_id)
+            .eq("user_id", user_id)
             .execute()
         )
 
@@ -231,12 +238,15 @@ class AudiobookStorage:
         return data[0] if data else None
 
     @classmethod
-    def delete_audiobook(cls, audiobook_id: str) -> bool:
-        """Delete an audiobook (file + metadata)."""
+    def delete_audiobook(cls, audiobook_id: str, user_id: Optional[str] = None) -> bool:
+        """Delete an audiobook (file + metadata) strictly enforcing owner ID limits."""
+        if not user_id or user_id == "legacy":
+            return False
+
         client = cls._get_client()
 
-        # Get metadata first
-        audiobook = cls.get_audiobook(audiobook_id)
+        # Get metadata first to strictly verify ownership
+        audiobook = cls.get_audiobook(audiobook_id, user_id=user_id)
         if not audiobook:
             return False
 

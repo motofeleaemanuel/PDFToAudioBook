@@ -8,7 +8,7 @@ import os
 import concurrent.futures
 from typing import List, Optional, Callable
 from openai import OpenAI
-from openai_limiter import with_rate_limit
+from openai_limiter import with_rate_limit, CancelledError
 
 from text_processor import TextChunk
 
@@ -56,12 +56,14 @@ class TextRefiner:
         return cls._client
 
     @classmethod
-    def refine_chunk(cls, chunk: TextChunk) -> TextChunk:
+    def refine_chunk(cls, chunk: TextChunk, check_cancelled=None) -> TextChunk:
         """
         Refine a single text chunk using GPT.
         Returns a new TextChunk with refined text.
         """
-        refined_text = cls._call_refinement_api(chunk.text, len(chunk.text) * 2)
+        refined_text = cls._call_refinement_api(
+            chunk.text, len(chunk.text) * 2, check_cancelled=check_cancelled
+        )
         return TextChunk(index=chunk.index, text=refined_text)
 
     @classmethod
@@ -84,7 +86,8 @@ class TextRefiner:
     def refine_all(
         cls,
         chunks: List[TextChunk],
-        progress_callback: Optional[Callable[[int, int, str], None]] = None
+        progress_callback: Optional[Callable[[int, int, str], None]] = None,
+        check_cancelled: Optional[Callable[[], bool]] = None
     ) -> List[TextChunk]:
         """
         Refine all text chunks using GPT in parallel.
@@ -92,6 +95,7 @@ class TextRefiner:
         Args:
             chunks: List of TextChunk objects to refine
             progress_callback: Optional callback(current, total, message)
+            check_cancelled: Optional callable returning True if the job is cancelled
 
         Returns:
             List of refined TextChunk objects
@@ -105,8 +109,13 @@ class TextRefiner:
         results_dict = {}
 
         def process_chunk(chunk: TextChunk) -> TextChunk:
+            if check_cancelled and check_cancelled():
+                return chunk
             try:
-                return cls.refine_chunk(chunk)
+                return cls.refine_chunk(chunk, check_cancelled=check_cancelled)
+            except CancelledError:
+                print(f"  🛑 Refinement chunk {chunk.index} cancelled.")
+                return chunk
             except Exception as e:
                 print(f"Eroare rafinare chunk {chunk.index}: {e}")
                 # Fallback: use original chunk if refinement fails

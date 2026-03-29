@@ -6,12 +6,18 @@ export const metadata = {
   keywords: "PDF, audiobook, text to speech, română, TTS, convertor",
 };
 
+import { TooltipProvider } from "@/components/ui/tooltip";
+import { Providers } from "@/components/providers";
+
 export default function RootLayout({ children }) {
   return (
-    <html lang="ro">
-      <body>
-        <div className="background-glow" />
-        {children}
+    <html lang="en" className="dark" suppressHydrationWarning>
+      <body className="antialiased font-sans bg-background text-foreground" suppressHydrationWarning>
+        <Providers>
+          <TooltipProvider>
+            {children}
+          </TooltipProvider>
+        </Providers>
       </body>
     </html>
   );

@@ -12,7 +12,7 @@ import concurrent.futures
 from dataclasses import dataclass, field
 from typing import List, Optional, Callable
 from openai import OpenAI
-from openai_limiter import with_rate_limit
+from openai_limiter import with_rate_limit, CancelledError
 
 
 # Minimum characters threshold: if a page has fewer than this many chars,
@@ -82,18 +82,22 @@ class PDFExtractor:
         return cls._client
 
     @classmethod
-    def _ocr_image_base64_with_vision(cls, img_b64: str) -> str:
+    def _ocr_image_base64_with_vision(cls, img_b64: str, check_cancelled=None) -> str:
         """
         Perform OCR on a base64 encoded PNG image using OpenAI Vision (GPT-4o).
 
         Args:
             img_b64: Base64 encoded PNG image string
+            check_cancelled: Optional callable that returns True if job was cancelled
 
         Returns:
             Extracted text from the image
         """
         try:
-            return cls._call_vision_api(img_b64)
+            return cls._call_vision_api(img_b64, check_cancelled=check_cancelled)
+        except CancelledError:
+            print(f"  🛑 Vision OCR cancelled.")
+            return ""
         except Exception as e:
             print(f"  OpenAI Vision OCR eroare: {e}")
             return ""
@@ -104,7 +108,7 @@ class PDFExtractor:
         """Rate-limited Vision API call."""
         client = cls._get_client()
         response = client.chat.completions.create(
-            model="gpt-4o",
+            model="gpt-4o-mini",
             messages=[
                 {
                     "role": "user",
@@ -132,6 +136,7 @@ class PDFExtractor:
         progress_callback: Optional[Callable[[int, int, str], None]] = None,
         force_ocr: bool = False,
         max_pages: Optional[int] = None,
+        check_cancelled: Optional[Callable[[], bool]] = None,
     ) -> PDFContent:
         """
         Extract text from a PDF file.
@@ -171,6 +176,10 @@ class PDFExtractor:
 
         # Phase 1: Sequential extraction and PNG rendering
         for page_num in range(pages_to_process):
+            if check_cancelled and check_cancelled():
+                doc.close()
+                return content # Empty content; app.py will abort anyway
+
             page = doc[page_num]
 
             if progress_callback:
@@ -218,7 +227,11 @@ class PDFExtractor:
             completed_ocr = 0
 
             def process_ocr(page_data):
-                ocr_text = cls._ocr_image_base64_with_vision(page_data["img_b64"])
+                if check_cancelled and check_cancelled():
+                    return page_data["page_num"], ""
+                ocr_text = cls._ocr_image_base64_with_vision(
+                    page_data["img_b64"], check_cancelled=check_cancelled
+                )
                 return page_data["page_num"], ocr_text
 
             # Execute concurrent requests with strict worker limit for Free Tier
@@ -238,6 +251,10 @@ class PDFExtractor:
                             if "img_b64" in p:
                                 del p["img_b64"]
                             break
+
+                    if check_cancelled and check_cancelled():
+                        # Let remaining futures exhaust without making API calls
+                        pass
 
                     completed_ocr += 1
                     if progress_callback:

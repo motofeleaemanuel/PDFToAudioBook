@@ -8,7 +8,7 @@ import io
 import concurrent.futures
 from typing import List, Optional, Callable
 from openai import OpenAI
-from openai_limiter import with_rate_limit
+from openai_limiter import with_rate_limit, CancelledError
 
 from text_processor import TextChunk
 
@@ -17,7 +17,7 @@ class TTSEngine:
     """Converts text chunks to a single MP3 audiobook using OpenAI TTS."""
 
     # OpenAI TTS settings
-    MODEL = "tts-1-hd"  # High-definition model for best quality
+    MODEL = "tts-1"      # Standard model (half the price of tts-1-hd, $15/1M chars)
     VOICE = "nova"       # Natural female voice, great for Romanian
     SPEED = 1.0          # Normal speed (0.25 to 4.0)
 
@@ -89,6 +89,7 @@ class TTSEngine:
         chunks: List[TextChunk],
         output_path: str,
         progress_callback: Optional[Callable[[int, int, str], None]] = None,
+        check_cancelled: Optional[Callable[[], bool]] = None
     ) -> str:
         """
         Convert a list of text chunks into a single MP3 audiobook in parallel.
@@ -97,6 +98,7 @@ class TTSEngine:
             chunks: List of TextChunk objects to convert
             output_path: Path for the output MP3 file
             progress_callback: Optional callback(current, total, status_message)
+            check_cancelled: Optional callable returning True if the job is cancelled
 
         Returns:
             Path to the generated MP3 file
@@ -124,8 +126,13 @@ class TTSEngine:
         completed = 0
 
         def process_audio(sub_info):
+            if check_cancelled and check_cancelled():
+                return sub_info["sub_index"], sub_info["original_index"], b""
+                
             sub_chunk = TextChunk(index=sub_info["chunk_obj"].index, text=sub_info["text"])
-            return sub_info["sub_index"], sub_info["original_index"], cls.convert_chunk_to_bytes(sub_chunk)
+            return sub_info["sub_index"], sub_info["original_index"], cls.convert_chunk_to_bytes(
+                sub_chunk, check_cancelled=check_cancelled
+            )
 
         # 2. Parallel processing with strict worker limit for Free Tier
         with concurrent.futures.ThreadPoolExecutor(max_workers=2) as executor:
@@ -136,6 +143,9 @@ class TTSEngine:
                 try:
                     c_idx, orig_idx, mp3_bytes = future.result()
                     results_bytes[c_idx] = mp3_bytes
+                except CancelledError:
+                    print(f"  \ud83d\uded1 TTS chunk {info['original_index'] + 1} cancelled.")
+                    results_bytes[info["sub_index"]] = b""
                 except Exception as e:
                     print(f"Eroare la generare audio (chunk {info['original_index'] + 1}): {e}")
                     results_bytes[info["sub_index"]] = b""

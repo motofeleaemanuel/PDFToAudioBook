@@ -15,7 +15,7 @@ from dotenv import load_dotenv
 # Load environment variables from .env
 load_dotenv()
 
-from flask import Flask, request, jsonify, send_file, redirect
+from flask import Flask, request, jsonify, send_file, redirect, g
 from flask_cors import CORS
 
 from pdf_extractor import PDFExtractor
@@ -38,7 +38,7 @@ def normalize_origin(orig):
 
 raw_origins = os.getenv("ALLOWED_ORIGINS", "http://localhost:3000").split(",")
 ALLOWED_ORIGINS = [normalize_origin(o) for o in raw_origins if o.strip()]
-CORS(app, origins=ALLOWED_ORIGINS)
+CORS(app, origins=ALLOWED_ORIGINS, supports_credentials=True, allow_headers=["Content-Type", "Authorization", "ngrok-skip-browser-warning", "Accept"])
 
 UPLOAD_DIR = os.path.join(os.path.dirname(__file__), "uploads")
 OUTPUT_DIR = os.path.join(os.path.dirname(__file__), "output")
@@ -79,28 +79,66 @@ def record_request(ip: str):
 
 
 # ── Auth Middleware ────────────────────────────────────────────
-def require_access_code(f):
-    """Decorator to require access code in Authorization header."""
+def require_auth(f):
+    """
+    Decorator to authenticate requests.
+    Supports two modes:
+      1. Supabase JWT (primary) — validates the token directly with Supabase API
+      2. Legacy access code (fallback) — simple string match for backwards compatibility
+    Sets g.user_id for downstream use.
+    """
     @wraps(f)
     def decorated(*args, **kwargs):
+        from flask import g, make_response
+        from storage import AudiobookStorage
+        
         if request.method == "OPTIONS":
-            return jsonify({}), 200
+            response = make_response()
+            response.headers.add("Access-Control-Allow-Origin", request.headers.get("Origin", "*"))
+            response.headers.add("Access-Control-Allow-Headers", "Content-Type, Authorization, ngrok-skip-browser-warning, Accept")
+            response.headers.add("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS")
+            response.headers.add("Access-Control-Allow-Credentials", "true")
+            return response, 200
+
         auth_header = request.headers.get("Authorization", "")
         if not auth_header.startswith("Bearer "):
-            return jsonify({"error": "Cod de acces lipsă."}), 401
+            return jsonify({"error": "Missing authentication token."}), 401
+            
         token = auth_header.replace("Bearer ", "")
-        if token != ACCESS_CODE:
-            return jsonify({"error": "Cod de acces invalid."}), 401
-        return f(*args, **kwargs)
+
+        # Use Supabase Auth API to verify JWT
+        if AudiobookStorage.is_configured():
+            try:
+                client = AudiobookStorage._get_client()
+                user_res = client.auth.get_user(token)
+                if user_res and user_res.user:
+                    g.user_id = user_res.user.id
+                    return f(*args, **kwargs)
+            except Exception as e:
+                import traceback
+                error_msg = str(e)
+                print(f"Supabase Auth Error: {error_msg}")
+                traceback.print_exc()
+                return jsonify({"error": f"Supabase auth failed: {error_msg}"}), 401
+
+        print(f"Auth reject: Invalid or missing valid Supabase JWT.")
+        return jsonify({"error": "Invalid authentication token."}), 401
     return decorated
 
 
 # ── Job Processing ─────────────────────────────────────────────
-def process_pdf_job(job_id: str, pdf_path: str, original_filename: str):
+def process_pdf_job(job_id: str, pdf_path: str, original_filename: str, user_id: str = None):
     """Background task: extract text → process → refine → TTS → MP3."""
+    import traceback
+
+    print(f"\n{'='*60}")
+    print(f"  🚀 JOB START: {job_id}")
+    print(f"  📄 File: {original_filename}")
+    print(f"{'='*60}")
 
     try:
         # Phase 1: Extract text (0-15%)
+        print(f"  [Phase 1/5] Extracting text...")
         job_store.update(job_id, status="extracting", message="Extrag textul din PDF...")
 
         def on_extract_progress(current, total, message=""):
@@ -110,24 +148,40 @@ def process_pdf_job(job_id: str, pdf_path: str, original_filename: str):
                 message=message or f"Extrag pagina {current} din {total}...",
             )
 
-        content = PDFExtractor.extract(pdf_path, progress_callback=on_extract_progress)
+        def _check_cancelled():
+            j = job_store.get(job_id)
+            return j and j.get("status") == "cancelled"
+
+        content = PDFExtractor.extract(
+            pdf_path, 
+            progress_callback=on_extract_progress, 
+            check_cancelled=_check_cancelled
+        )
+
+        if _check_cancelled():
+            print(f"  ❌ Phase 1 cancelled — aborting")
+            return
         job_store.update(
             job_id,
             total_pages=content.total_pages,
             metadata=content.metadata,
             ocr_pages=content.ocr_pages_count,
         )
+        print(f"  [Phase 1/5] ✅ Done — {content.total_pages} pages, {content.ocr_pages_count} OCR")
 
         if not content.full_text.strip():
             job_store.update(job_id, status="error", message="PDF-ul nu conține text extractibil (nici prin OCR).")
+            print(f"  ❌ No text found — aborting")
             return
 
         # Phase 2: Clean text & save to file (15-20%)
+        print(f"  [Phase 2/5] Processing text...")
         job_store.update(job_id, status="processing", progress=18, message="Procesez și curăț textul...")
         chunks = TextProcessor.process(content.full_text)
 
         if not chunks:
             job_store.update(job_id, status="error", message="Nu am putut extrage text util din PDF.")
+            print(f"  ❌ No chunks produced — aborting")
             return
 
         # Save extracted text to file for reference
@@ -139,9 +193,15 @@ def process_pdf_job(job_id: str, pdf_path: str, original_filename: str):
             for chunk in chunks:
                 f.write(chunk.text + "\n\n")
         job_store.update(job_id, text_file=text_file_path)
-        print(f"  Text salvat: {text_file_path}")
+        print(f"  [Phase 2/5] ✅ Done — {len(chunks)} chunks")
+
+        # Function to easily check cancellation
+        def is_cancelled():
+            j = job_store.get(job_id)
+            return j and j.get("status") == "cancelled"
 
         # Phase 3: LLM Refinement (20-45%)
+        print(f"  [Phase 3/5] AI refinement ({len(chunks)} chunks)...")
         job_store.update(job_id, status="refining", progress=20, message="Rafinare AI — verific fluența textului...")
 
         def on_refine_progress(current, total, message):
@@ -151,12 +211,32 @@ def process_pdf_job(job_id: str, pdf_path: str, original_filename: str):
                 message=message,
             )
 
-        chunks = TextRefiner.refine_all(chunks, progress_callback=on_refine_progress)
+        chunks = TextRefiner.refine_all(chunks, progress_callback=on_refine_progress, check_cancelled=is_cancelled)
+        if is_cancelled():
+            print(f"  🛑 JOB CANCELLED during refinement: {job_id}")
+            return
+            
         job_store.update(
             job_id,
             total_chunks=len(chunks),
             estimated_duration=round(TTSEngine.get_estimated_duration(chunks), 1),
         )
+        print(f"  [Phase 3/5] ✅ Done — {len(chunks)} chunks refined")
+
+        # Strict mid-processing token/credit evaluation
+        current_job = job_store.get(job_id) or {}
+        duration_hours = current_job.get("estimated_duration", 0) / 60.0
+        
+        if user_id and user_id != "legacy" and duration_hours > 0:
+            client = AudiobookStorage._get_client()
+            if client:
+                res = client.table("profiles").select("credits_hours").eq("id", user_id).execute()
+                if res.data and len(res.data) > 0:
+                    current_credits = float(res.data[0].get("credits_hours", 0))
+                    if duration_hours > current_credits:
+                        error_msg = f"Insufficient credits. This audiobook requires ~{duration_hours:.2f} hours, but your balance is {current_credits:.2f} hours."
+                        print(f"  🛑 {error_msg}")
+                        raise Exception(error_msg)
 
         # Save refined text too
         refined_text_path = os.path.join(OUTPUT_DIR, f"{job_id}_refined.txt")
@@ -164,9 +244,9 @@ def process_pdf_job(job_id: str, pdf_path: str, original_filename: str):
             f.write(f"=== Text rafinat pentru audiobook: {original_filename} ===\n\n")
             for chunk in chunks:
                 f.write(chunk.text + "\n\n")
-        print(f"  Text rafinat salvat: {refined_text_path}")
 
         # Phase 4: TTS Conversion (45-95%)
+        print(f"  [Phase 4/5] TTS conversion ({len(chunks)} chunks)...")
         job_store.update(job_id, status="converting", progress=45)
 
         output_filename = f"{base_name}_audiobook.mp3"
@@ -184,9 +264,17 @@ def process_pdf_job(job_id: str, pdf_path: str, original_filename: str):
             chunks,
             output_path,
             progress_callback=on_tts_progress,
+            check_cancelled=is_cancelled
         )
+        
+        if is_cancelled():
+            print(f"  🛑 JOB CANCELLED during TTS conversion: {job_id}")
+            return
+            
+        print(f"  [Phase 4/5] ✅ Done — MP3 saved")
 
         # Phase 5: Upload to Supabase (95-100%)
+        print(f"  [Phase 5/5] Cloud upload...")
         job_store.update(job_id, status="uploading_cloud", progress=96, message="Salvez audiobook-ul în cloud...")
 
         # Read current job state for Supabase upload metadata
@@ -202,6 +290,7 @@ def process_pdf_job(job_id: str, pdf_path: str, original_filename: str):
                     original_name=original_filename,
                     duration_minutes=current_job.get("estimated_duration", 0),
                     total_pages=current_job.get("total_pages", 0),
+                    user_id=user_id,
                 )
                 cloud_url = metadata.get("public_url", "")
                 job_store.update(
@@ -209,13 +298,33 @@ def process_pdf_job(job_id: str, pdf_path: str, original_filename: str):
                     cloud_url=cloud_url,
                     audiobook_id=metadata.get("id", ""),
                 )
+                
+                # CREDIT DEDUCTION
+                if user_id and user_id != "legacy":
+                    client = AudiobookStorage._get_client()
+                    if client:
+                        duration_hours = current_job.get("estimated_duration", 0) / 60.0
+                        if duration_hours > 0:
+                            # Log transaction
+                            client.table("credit_transactions").insert({
+                                "user_id": user_id,
+                                "type": "usage",
+                                "hours": -duration_hours,
+                                "description": f"Generated audiobook: {original_filename}"
+                            }).execute()
+                            
+                            # Decrement profile balance
+                            res = client.table("profiles").select("credits_hours").eq("id", user_id).execute()
+                            if res.data and len(res.data) > 0:
+                                current_credits = float(res.data[0].get("credits_hours", 0))
+                                new_credits = max(0.0, current_credits - duration_hours)
+                                client.table("profiles").update({"credits_hours": new_credits}).eq("id", user_id).execute()
                 parts = metadata.get("parts")
                 if parts and parts > 1:
                     print(f"  ✅ Supabase upload OK — {parts} părți uploadate")
                 else:
                     print(f"  ✅ Supabase upload OK — cloud_url: {cloud_url}")
             except Exception as e:
-                import traceback
                 print(f"  ⚠️ Supabase upload failed: {e}")
                 traceback.print_exc()
                 # Continue anyway — file is still local
@@ -231,10 +340,18 @@ def process_pdf_job(job_id: str, pdf_path: str, original_filename: str):
             output_path=output_path,
             output_filename=output_filename,
         )
+        print(f"  [Phase 5/5] ✅ JOB COMPLETED: {job_id}")
 
     except Exception as e:
-        job_store.update(job_id, status="error", message=f"Eroare: {str(e)}")
-        print(f"Job {job_id} error: {e}")
+        # ── FAILSAFE: Guarantee the DB is updated to error status ──
+        error_msg = f"Eroare: {str(e)}"
+        print(f"\n  💀 JOB CRASHED: {job_id}")
+        print(f"  Error: {error_msg}")
+        traceback.print_exc()
+        try:
+            job_store.update(job_id, status="error", message=error_msg)
+        except Exception as db_err:
+            print(f"  🚨 CRITICAL: Could not update DB with error status: {db_err}")
 
     finally:
         # Cleanup temp files (PDF, text) to save disk space
@@ -251,7 +368,11 @@ def process_pdf_job(job_id: str, pdf_path: str, original_filename: str):
         # NOTE: MP3 is kept locally until downloaded, then cleaned up
         #       by the /api/download endpoint
         # Periodically clean up old finished jobs from the database
-        job_store.cleanup_old()
+        try:
+            job_store.cleanup_old()
+        except Exception:
+            pass
+        print(f"  🏁 JOB THREAD EXIT: {job_id}\n")
 
 
 # ── API Routes ─────────────────────────────────────────────────
@@ -277,7 +398,7 @@ def verify_access_code():
 
 
 @app.route("/api/upload", methods=["POST", "OPTIONS"])
-@require_access_code
+@require_auth
 def upload_pdf():
     """Upload a PDF file and start conversion."""
     # Rate limiting
@@ -297,6 +418,17 @@ def upload_pdf():
 
     if not file.filename.lower().endswith(".pdf"):
         return jsonify({"error": "Doar fișiere PDF sunt acceptate."}), 400
+
+    from flask import g
+    user_id = getattr(g, "user_id", None)
+    if user_id and user_id != "legacy":
+        client = AudiobookStorage._get_client()
+        if client:
+            res = client.table("profiles").select("credits_hours").eq("id", user_id).execute()
+            if res.data and len(res.data) > 0:
+                credits_hours = float(res.data[0].get("credits_hours", 0))
+                if credits_hours <= 0:
+                    return jsonify({"error": "Your credit balance is empty. Please add more hours from the Billing page to generate audiobooks."}), 402
 
     # Save uploaded file
     job_id = str(uuid.uuid4())
@@ -326,7 +458,7 @@ def upload_pdf():
     # Start background processing
     thread = threading.Thread(
         target=process_pdf_job,
-        args=(job_id, pdf_path, file.filename),
+        args=(job_id, pdf_path, file.filename, user_id),
         daemon=True
     )
     thread.start()
@@ -334,8 +466,51 @@ def upload_pdf():
     return jsonify({"job_id": job_id, "status": "queued"}), 202
 
 
+@app.route("/api/jobs/<job_id>", methods=["DELETE", "OPTIONS"])
+@require_auth
+def cancel_job(job_id: str):
+    """Cancel a running job and proportionally charge credits."""
+    if request.method == "OPTIONS":
+        return jsonify({}), 200
+
+    job = job_store.get(job_id)
+    if not job:
+        return jsonify({"error": "Job-ul nu a fost găsit."}), 404
+
+    if job.get("status") in ["completed", "error", "cancelled"]:
+        return jsonify({"status": job.get("status")}), 200
+
+    from flask import g
+    user_id = getattr(g, "user_id", None)
+    
+    if user_id and user_id != "legacy":
+        client = AudiobookStorage._get_client()
+        if client:
+            est_duration = job.get("estimated_duration", 0) / 60.0
+            total_chunks = max(1, job.get("total_chunks", 1))
+            current_chunk = job.get("current_chunk", 0)
+            
+            proportional_hours = est_duration * (current_chunk / total_chunks)
+            if proportional_hours > 0:
+                client.table("credit_transactions").insert({
+                    "user_id": user_id,
+                    "type": "usage",
+                    "hours": -proportional_hours,
+                    "description": f"Anulare audiobook: {job.get('original_filename')} ({current_chunk}/{total_chunks} chunk-uri)"
+                }).execute()
+                
+                res = client.table("profiles").select("credits_hours").eq("id", user_id).execute()
+                if res.data:
+                    current_credits = float(res.data[0].get("credits_hours", 0))
+                    new_credits = max(0.0, current_credits - proportional_hours)
+                    client.table("profiles").update({"credits_hours": new_credits}).eq("id", user_id).execute()
+
+    job_store.update(job_id, status="cancelled", message="Conversia a fost oprită manual de utilizator.")
+    return jsonify({"status": "cancelled", "job_id": job_id})
+
+
 @app.route("/api/status/<job_id>", methods=["GET", "OPTIONS"])
-@require_access_code
+@require_auth
 def get_status(job_id: str):
     """Get the status and progress of a conversion job."""
     job = job_store.get(job_id)
@@ -358,14 +533,16 @@ def get_status(job_id: str):
 
 
 @app.route("/api/audiobooks", methods=["GET", "OPTIONS"])
-@require_access_code
+@require_auth
 def list_audiobooks():
     """List all previously generated audiobooks from Supabase and storage usage."""
     if not AudiobookStorage.is_configured():
         return jsonify({"audiobooks": [], "storage": None})  # No storage configured
     try:
-        audiobooks = AudiobookStorage.list_audiobooks()
-        storage_usage = AudiobookStorage.get_storage_usage()
+        from flask import g
+        user_id = getattr(g, "user_id", None)
+        audiobooks = AudiobookStorage.list_audiobooks(user_id=user_id)
+        storage_usage = AudiobookStorage.get_storage_usage(user_id=user_id)
         
         return jsonify({
             "audiobooks": audiobooks,
@@ -376,13 +553,15 @@ def list_audiobooks():
 
 
 @app.route("/api/audiobooks/<audiobook_id>", methods=["DELETE", "OPTIONS"])
-@require_access_code
+@require_auth
 def delete_audiobook(audiobook_id: str):
     """Delete an audiobook from Supabase."""
     if not AudiobookStorage.is_configured():
         return jsonify({"error": "Storage not configured"}), 500
     try:
-        success = AudiobookStorage.delete_audiobook(audiobook_id)
+        from flask import g
+        user_id = getattr(g, "user_id", None)
+        success = AudiobookStorage.delete_audiobook(audiobook_id, user_id=user_id)
         if success:
             return jsonify({"deleted": True})
         return jsonify({"error": "Audiobook-ul nu a fost găsit."}), 404
@@ -391,7 +570,7 @@ def delete_audiobook(audiobook_id: str):
 
 
 @app.route("/api/download/<job_id>", methods=["GET", "OPTIONS"])
-@require_access_code
+@require_auth
 def download_file(job_id: str):
     """Download the generated audiobook MP3."""
     job = job_store.get(job_id)
