@@ -106,7 +106,7 @@ export function AppSidebar() {
                       <Loader2 className="h-3.5 w-3.5 animate-spin text-primary flex-shrink-0" />
                       <div className="flex-1 min-w-0">
                         <p className="text-xs font-medium text-white/80 truncate">
-                          {job.file?.name || "Document"}
+                          {job.file?.name || job.filename || "Document"}
                         </p>
                         <div className="flex items-center gap-2 mt-1">
                           <div className="flex-1 h-1 bg-black/30 rounded-full overflow-hidden">
