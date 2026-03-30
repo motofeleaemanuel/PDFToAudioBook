@@ -32,7 +32,7 @@ async function fetchDashboardStats() {
   const res = await fetch(`${API_BASE}/audiobooks`, { headers });
   
   let bookCount = 0;
-  let pagesCount = 0;
+  let totalCreditsUsed = 0;
   let storagePercent = 0;
   let books = [];
 
@@ -40,7 +40,8 @@ async function fetchDashboardStats() {
     const data = await res.json();
     books = data.audiobooks || [];
     bookCount = books.length;
-    pagesCount = books.reduce((sum, b) => sum + (b.total_pages || 0), 0);
+    // Total credits used = sum of duration_minutes / 60
+    totalCreditsUsed = books.reduce((sum, b) => sum + ((b.duration_minutes || 0) / 60), 0);
     if (data.storage) {
       storagePercent = data.storage.percentage || 0;
     }
@@ -60,10 +61,10 @@ async function fetchDashboardStats() {
       icon: Headphones,
     },
     {
-      title: "Pages Processed",
-      value: pagesCount.toString(),
-      subtitle: "Total extracted",
-      icon: Activity,
+      title: "Credits Used",
+      value: `${totalCreditsUsed.toFixed(2)} h`,
+      subtitle: "Lifetime consumption",
+      icon: TrendingUp,
     },
     {
       title: "Storage Usage",
@@ -83,7 +84,7 @@ async function fetchDashboardStats() {
     timelineDataMap.set(dateStr, { 
       date: dateStr, 
       audiobooks: 0, 
-      pages: 0, 
+      credits: 0, 
       displayDate: d.toLocaleDateString('en-US', { month: 'short', day: 'numeric' })
     });
   }
@@ -94,7 +95,7 @@ async function fetchDashboardStats() {
       if (timelineDataMap.has(dateStr)) {
         const entry = timelineDataMap.get(dateStr);
         entry.audiobooks += 1;
-        entry.pages += (b.total_pages || 0);
+        entry.credits += ((b.duration_minutes || 0) / 60);
       }
     }
   });
@@ -125,14 +126,14 @@ export default function DashboardPage() {
   const chartConfigAudiobooks = {
     audiobooks: {
       label: "Audiobooks Generated",
-      color: "#8b5cf6", // Violet 500
+      color: "var(--primary)",
     },
   };
 
-  const chartConfigPages = {
-    pages: {
-      label: "Pages Processed",
-      color: "#3b82f6", // Blue 500
+  const chartConfigCredits = {
+    credits: {
+      label: "Credits Used (h)",
+      color: "var(--primary)", 
     },
   };
 
@@ -140,7 +141,7 @@ export default function DashboardPage() {
     <div className="space-y-8 pb-8">
       {/* Hero Welcome */}
       <div className="relative overflow-hidden rounded-2xl glass-card p-8 md:p-10 border border-white/5">
-        <div className="absolute inset-0 bg-gradient-to-br from-violet-600/10 via-transparent to-blue-600/10 pointer-events-none" />
+        <div className="absolute inset-0 bg-gradient-to-br from-primary/10 via-transparent to-transparent pointer-events-none" />
         <div className="relative z-10">
           <h1 className="text-4xl md:text-5xl font-bold tracking-tight mb-4 text-white">
             Welcome back
@@ -151,7 +152,7 @@ export default function DashboardPage() {
           <div className="flex gap-3 mt-6">
             <Button
               size="lg"
-              className="bg-violet-600 hover:bg-violet-700 text-white font-medium"
+              className="bg-primary hover:opacity-90 text-white font-medium transition-all"
               onClick={() => router.push('/dashboard/upload')}
             >
               Convert New PDF
@@ -208,7 +209,7 @@ export default function DashboardPage() {
                           dataKey="value"
                           stroke="none"
                         >
-                          <Cell fill="#8b5cf6" />
+                          <Cell fill="var(--primary)" />
                           <Cell fill="rgba(255,255,255,0.1)" />
                         </Pie>
                       </PieChart>
@@ -232,7 +233,7 @@ export default function DashboardPage() {
         <Card className="glass-card border-white/5 overflow-hidden flex flex-col">
           <CardHeader>
             <CardTitle className="text-lg font-medium text-white flex items-center gap-2">
-              <Headphones className="w-5 h-5 text-violet-500" />
+              <Headphones className="w-5 h-5 text-primary" />
               Audiobook Creation Timeline
             </CardTitle>
             <CardDescription className="text-white/50">Audiobooks generated over the last 14 days.</CardDescription>
@@ -276,16 +277,16 @@ export default function DashboardPage() {
         <Card className="glass-card border-white/5 overflow-hidden flex flex-col">
           <CardHeader>
             <CardTitle className="text-lg font-medium text-white flex items-center gap-2">
-              <Activity className="w-5 h-5 text-blue-500" />
-              Processing Activity
+              <TrendingUp className="w-5 h-5 text-primary" />
+              Credit Usage
             </CardTitle>
-            <CardDescription className="text-white/50">Total pages extracted and processed over the last 14 days.</CardDescription>
+            <CardDescription className="text-white/50">Estimated credit consumption (hours) over the last 14 days.</CardDescription>
           </CardHeader>
           <CardContent className="flex-1 pb-4">
             {isLoading ? (
               <Skeleton className="w-full h-[250px] bg-white/5 rounded-xl" />
             ) : (
-              <ChartContainer config={chartConfigPages} className="min-h-[200px] w-full">
+              <ChartContainer config={chartConfigCredits} className="min-h-[200px] w-full">
                 <BarChart data={timeline} margin={{ top: 10, right: 10, left: -20, bottom: 0 }}>
                   <CartesianGrid strokeDasharray="3 3" vertical={false} stroke="rgba(255,255,255,0.05)" />
                   <XAxis 
@@ -295,10 +296,13 @@ export default function DashboardPage() {
                     tickMargin={10} 
                     tick={{ fill: 'rgba(255,255,255,0.5)', fontSize: 12 }}
                   />
-                  <ChartTooltip content={<ChartTooltipContent />} />
+                  <ChartTooltip 
+                    content={<ChartTooltipContent labelFormatter={(val) => val} />} 
+                    formatter={(value) => [`${parseFloat(value).toFixed(2)} h`, "Credits"]}
+                  />
                   <Bar
-                    dataKey="pages"
-                    fill="var(--color-pages)"
+                    dataKey="credits"
+                    fill="var(--color-credits)"
                     radius={[4, 4, 0, 0]}
                   />
                 </BarChart>

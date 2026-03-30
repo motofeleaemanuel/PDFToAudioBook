@@ -98,7 +98,7 @@ export default function SignupPage() {
             <div className="inline-flex items-center justify-center w-16 h-16 rounded-2xl bg-primary/10 border border-primary/20 mb-6">
               <Headphones className="h-8 w-8 text-primary" />
             </div>
-            <h1 className="text-3xl font-bold tracking-tight bg-clip-text text-transparent bg-gradient-to-r from-primary to-blue-400">
+            <h1 className="text-3xl font-bold tracking-tight bg-clip-text text-transparent bg-gradient-to-r from-primary via-primary/80 to-transparent">
               Create your account
             </h1>
             <p className="text-muted-foreground mt-2">Start converting PDFs to audiobooks in seconds</p>

@@ -124,15 +124,18 @@ export function JobProvider({ children }) {
 
         if (data.status === "completed") {
           patch.status = "completed";
+          patch.completedAt = Date.now();
           updateJob(localId, patch);
           clearStoredJob(localId);
         } else if (data.status === "error") {
           patch.status = "error";
           patch.error = data.message;
+          patch.completedAt = Date.now();
           updateJob(localId, patch);
           clearStoredJob(localId);
         } else if (data.status === "cancelled") {
           patch.status = "cancelled";
+          patch.completedAt = Date.now();
           updateJob(localId, patch);
           clearStoredJob(localId);
         } else {
@@ -280,9 +283,30 @@ export function JobProvider({ children }) {
 
   // ─── computed helpers ───
   const activeJobs = jobs.filter(j => j.status === "uploading" || j.status === "processing");
+  
+  // Jobs visible in sidebar: active + recently finished (completed/error within last 15s)
+  const SIDEBAR_LINGER_MS = 15000;
+  const sidebarJobs = jobs.filter(j => {
+    if (j.status === "uploading" || j.status === "processing") return true;
+    if (["completed", "error", "cancelled"].includes(j.status) && j.completedAt) {
+      return Date.now() - j.completedAt < SIDEBAR_LINGER_MS;
+    }
+    return false;
+  });
+
+  // Auto-refresh to dismiss lingering sidebar entries
+  const [, forceUpdate] = useState(0);
+  useEffect(() => {
+    const hasLingering = jobs.some(j => 
+      ["completed", "error", "cancelled"].includes(j.status) && j.completedAt && Date.now() - j.completedAt < SIDEBAR_LINGER_MS
+    );
+    if (!hasLingering) return;
+    const timer = setTimeout(() => forceUpdate(n => n + 1), SIDEBAR_LINGER_MS);
+    return () => clearTimeout(timer);
+  }, [jobs]);
 
   return (
-    <JobContext.Provider value={{ jobs, activeJobs, addJobs, startJob, cancelJob, removeJob, updateJob }}>
+    <JobContext.Provider value={{ jobs, activeJobs, sidebarJobs, addJobs, startJob, cancelJob, removeJob, updateJob }}>
       {children}
     </JobContext.Provider>
   );

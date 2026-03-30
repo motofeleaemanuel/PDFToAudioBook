@@ -42,8 +42,11 @@ CORS(app, origins=ALLOWED_ORIGINS, supports_credentials=True, allow_headers=["Co
 
 UPLOAD_DIR = os.path.join(os.path.dirname(__file__), "uploads")
 OUTPUT_DIR = os.path.join(os.path.dirname(__file__), "output")
-os.makedirs(UPLOAD_DIR, exist_ok=True)
-os.makedirs(OUTPUT_DIR, exist_ok=True)
+# Ensure directory creation is reliable
+for d in [UPLOAD_DIR, OUTPUT_DIR]:
+    if not os.path.exists(d):
+        os.makedirs(d, exist_ok=True)
+        print(f"  📁 Created directory: {d}")
 
 # Access code from environment (default for dev)
 ACCESS_CODE = os.getenv("ACCESS_CODE", "audiobook2024")

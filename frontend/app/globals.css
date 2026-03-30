@@ -115,8 +115,18 @@
 }
 
 @layer base {
+  :root {
+    --transition-speed: 0.4s;
+  }
+
   * {
     @apply border-border outline-ring/50;
+    transition: background-color var(--transition-speed) ease,
+      border-color var(--transition-speed) ease,
+      color var(--transition-speed) ease,
+      fill var(--transition-speed) ease,
+      stroke var(--transition-speed) ease,
+      box-shadow var(--transition-speed) ease;
   }
 
   body {
@@ -140,7 +150,8 @@
   left: -50%;
   width: 200%;
   height: 200%;
-  background: radial-gradient(circle closest-side, rgba(168, 85, 247, 0.14) 0%, transparent 80%);
+  background: radial-gradient(circle closest-side, var(--primary-glow) 0%, transparent 80%);
+  opacity: 0.4;
   animation: floatGlow 20s ease-in-out infinite;
 }
 
@@ -151,7 +162,8 @@
   right: -50%;
   width: 200%;
   height: 200%;
-  background: radial-gradient(circle closest-side, rgba(217, 70, 239, 0.10) 0%, transparent 80%);
+  background: radial-gradient(circle closest-side, var(--primary-glow) 0%, transparent 80%);
+  opacity: 0.3;
   animation: floatGlow 25s ease-in-out infinite reverse;
 }
 
