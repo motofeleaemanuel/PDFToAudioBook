@@ -315,41 +315,50 @@ def process_pdf_job(job_id: str, pdf_path: str, original_filename: str, user_id:
                     user_id=user_id,
                 )
                 cloud_url = metadata.get("public_url", "")
+                all_public_urls = metadata.get("all_public_urls", [cloud_url] if cloud_url else [])
                 job_store.update(
                     job_id,
                     cloud_url=cloud_url,
+                    cloud_urls=all_public_urls,
                     audiobook_id=metadata.get("id", ""),
                 )
-                
-                # CREDIT DEDUCTION
-                if user_id and user_id != "legacy":
-                    client = AudiobookStorage._get_client()
-                    if client:
-                        duration_hours = current_job.get("estimated_duration", 0) / 60.0
-                        if duration_hours > 0:
-                            # Log transaction
-                            client.table("credit_transactions").insert({
-                                "user_id": user_id,
-                                "type": "usage",
-                                "hours": -duration_hours,
-                                "description": f"Generated audiobook: {original_filename}"
-                            }).execute()
-                            
-                            # Decrement profile balance
-                            res = client.table("profiles").select("credits_hours").eq("id", user_id).execute()
-                            if res.data and len(res.data) > 0:
-                                current_credits = float(res.data[0].get("credits_hours", 0))
-                                new_credits = max(0.0, current_credits - duration_hours)
-                                client.table("profiles").update({"credits_hours": new_credits}).eq("id", user_id).execute()
                 parts = metadata.get("parts")
                 if parts and parts > 1:
                     print(f"  ✅ Supabase upload OK — {parts} părți uploadate")
                 else:
                     print(f"  ✅ Supabase upload OK — cloud_url: {cloud_url}")
+
+                # ── CREDIT DEDUCTION (only on full success: generation + upload) ──
+                if user_id and user_id != "legacy":
+                    duration_hours = current_job.get("estimated_duration", 0) / 60.0
+                    if duration_hours > 0:
+                        print(f"  💳 Deducting {duration_hours:.4f} hours from user {user_id}")
+                        admin = AudiobookStorage._get_admin_client()
+                        # Log transaction
+                        admin.table("credit_transactions").insert({
+                            "user_id": user_id,
+                            "type": "usage",
+                            "hours": -duration_hours,
+                            "description": f"Generated audiobook: {original_filename}"
+                        }).execute()
+                        print(f"  💳 Transaction logged OK")
+                        # Decrement profile balance
+                        res = admin.table("profiles").select("credits_hours").eq("id", user_id).execute()
+                        print(f"  💳 Profile query returned {len(res.data or [])} rows")
+                        if res.data and len(res.data) > 0:
+                            current_credits = float(res.data[0].get("credits_hours", 0))
+                            new_credits = max(0.0, current_credits - duration_hours)
+                            admin.table("profiles").update({"credits_hours": new_credits}).eq("id", user_id).execute()
+                            print(f"  💳 Credits updated: {current_credits:.4f}h → {new_credits:.4f}h")
+                        else:
+                            print(f"  ⚠️ No profile found for user {user_id} — credits NOT deducted")
+                    else:
+                        print(f"  💳 Skipping deduction: estimated_duration is 0")
+
             except Exception as e:
-                print(f"  ⚠️ Supabase upload failed: {e}")
+                print(f"  ⚠️ Supabase upload/credit failed: {e}")
                 traceback.print_exc()
-                # Continue anyway — file is still local
+                # No credits deducted on failure — user is not charged
         else:
             print("  ⚠️ Supabase not configured — keeping file local only")
 
@@ -551,6 +560,7 @@ def get_status(job_id: str):
         "metadata": job["metadata"],
         "output_filename": job["output_filename"],
         "cloud_url": job.get("cloud_url"),
+        "cloud_urls": job.get("cloud_urls", []),
     })
 
 

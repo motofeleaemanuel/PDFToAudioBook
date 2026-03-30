@@ -8,6 +8,7 @@ const API_BASE = rawApiUrl.endsWith("/api") ? rawApiUrl : `${rawApiUrl.replace(/
 
 const POLL_INTERVAL = 5000;
 const MAX_POLL_RETRIES = 12;
+const STORAGE_KEY = "pdfaudio_active_jobs";
 
 const JobContext = createContext(null);
 
@@ -17,9 +18,35 @@ export function useJobs() {
   return ctx;
 }
 
+// ─── localStorage helpers ───
+function saveActiveJobs(jobs) {
+  try {
+    const active = jobs
+      .filter(j => j.jobId && !["completed", "error", "cancelled"].includes(j.status))
+      .map(j => ({ id: j.id, jobId: j.jobId, filename: j.file?.name || j.filename || "Unknown" }));
+    localStorage.setItem(STORAGE_KEY, JSON.stringify(active));
+  } catch {}
+}
+
+function loadActiveJobs() {
+  try {
+    const raw = localStorage.getItem(STORAGE_KEY);
+    return raw ? JSON.parse(raw) : [];
+  } catch { return []; }
+}
+
+function clearStoredJob(localId) {
+  try {
+    const stored = loadActiveJobs();
+    const filtered = stored.filter(j => j.id !== localId);
+    localStorage.setItem(STORAGE_KEY, JSON.stringify(filtered));
+  } catch {}
+}
+
 export function JobProvider({ children }) {
   const [jobs, setJobs] = useState([]);
   const jobsRef = useRef(jobs);
+  const hasRestoredRef = useRef(false);
   
   // Keep jobsRef in sync with jobs state
   useEffect(() => { jobsRef.current = jobs; }, [jobs]);
@@ -67,6 +94,7 @@ export function JobProvider({ children }) {
         // True 404 = job genuinely doesn't exist in backend → fatal
         if (response.status === 404) {
           updateJob(localId, { status: "error", error: "Job not found on server." });
+          clearStoredJob(localId);
           return;
         }
 
@@ -76,6 +104,7 @@ export function JobProvider({ children }) {
           console.warn(`Poll ${backendJobId}: HTTP ${response.status}, attempt ${failCounts.current[localId]}/${MAX_POLL_RETRIES}`);
           if (failCounts.current[localId] >= MAX_POLL_RETRIES) {
             updateJob(localId, { status: "error", error: "Server stopped responding." });
+            clearStoredJob(localId);
             return;
           }
           // Exponential backoff: 5s, 10s, 15s...
@@ -96,13 +125,16 @@ export function JobProvider({ children }) {
         if (data.status === "completed") {
           patch.status = "completed";
           updateJob(localId, patch);
+          clearStoredJob(localId);
         } else if (data.status === "error") {
           patch.status = "error";
           patch.error = data.message;
           updateJob(localId, patch);
+          clearStoredJob(localId);
         } else if (data.status === "cancelled") {
           patch.status = "cancelled";
           updateJob(localId, patch);
+          clearStoredJob(localId);
         } else {
           patch.status = "processing";
           updateJob(localId, patch);
@@ -113,6 +145,7 @@ export function JobProvider({ children }) {
         console.warn(`Poll ${backendJobId}: network error, attempt ${failCounts.current[localId]}/${MAX_POLL_RETRIES}`);
         if (failCounts.current[localId] >= MAX_POLL_RETRIES) {
           updateJob(localId, { status: "error", error: "Network connection lost." });
+          clearStoredJob(localId);
           return;
         }
         const backoff = POLL_INTERVAL * (1 + failCounts.current[localId] * 0.5);
@@ -154,13 +187,50 @@ export function JobProvider({ children }) {
       }
 
       const data = await response.json();
-      updateJob(localId, { jobId: data.job_id, status: "processing" });
+      updateJob(localId, { jobId: data.job_id, status: "processing", filename: targetJob.file.name });
+
+      // Persist to localStorage so we can resume after refresh
+      setJobs(prev => {
+        const updated = prev.map(j => j.id === localId ? { ...j, jobId: data.job_id, status: "processing", filename: targetJob.file.name } : j);
+        saveActiveJobs(updated);
+        return updated;
+      });
+
       startPolling(localId, data.job_id);
     } catch (err) {
       if (err.name === "AbortError") return;
       updateJob(localId, { status: "error", error: err.message || "Failed to start conversion." });
     }
   }, [updateJob, startPolling]);
+
+  // ─── restore jobs from localStorage on mount ───
+  useEffect(() => {
+    if (hasRestoredRef.current) return;
+    hasRestoredRef.current = true;
+
+    const stored = loadActiveJobs();
+    if (stored.length === 0) return;
+
+    console.log(`[JobProvider] Restoring ${stored.length} active job(s) from localStorage`);
+    const restoredJobs = stored.map(s => ({
+      id: s.id,
+      file: null,
+      jobId: s.jobId,
+      filename: s.filename,
+      status: "processing",
+      progress: 0,
+      message: "Reconnecting...",
+      error: null,
+      details: null,
+    }));
+
+    setJobs(prev => [...restoredJobs, ...prev]);
+
+    // Resume polling for each restored job
+    for (const s of stored) {
+      startPolling(s.id, s.jobId);
+    }
+  }, [startPolling]);
 
   // ─── cancel a job ───
   const cancelJob = useCallback(async (localId) => {
@@ -172,6 +242,7 @@ export function JobProvider({ children }) {
       clearTimeout(pollTimers.current[localId]);
       delete pollTimers.current[localId];
     }
+    clearStoredJob(localId);
 
     try {
       if (targetJob.jobId) {
@@ -194,6 +265,7 @@ export function JobProvider({ children }) {
       clearTimeout(pollTimers.current[localId]);
       delete pollTimers.current[localId];
     }
+    clearStoredJob(localId);
     // fire-and-forget backend delete for non-terminal jobs
     setJobs(prev => {
       const job = prev.find(j => j.id === localId);

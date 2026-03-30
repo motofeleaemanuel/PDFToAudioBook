@@ -18,10 +18,11 @@ class AudiobookStorage:
     TABLE_NAME = "audiobooks"
 
     _client: Optional[Client] = None
+    _admin_client: Optional[Client] = None
 
     @classmethod
     def _get_client(cls) -> Client:
-        """Get or create Supabase client."""
+        """Get or create Supabase client (anon key — subject to RLS)."""
         if cls._client is None:
             url = os.getenv("SUPABASE_URL")
             key = os.getenv("SUPABASE_KEY")
@@ -31,6 +32,20 @@ class AudiobookStorage:
                 )
             cls._client = create_client(url, key)
         return cls._client
+
+    @classmethod
+    def _get_admin_client(cls) -> Client:
+        """Get or create Supabase admin client (service_role key — bypasses RLS).
+        Falls back to anon client if SUPABASE_SERVICE_KEY is not set."""
+        if cls._admin_client is None:
+            url = os.getenv("SUPABASE_URL")
+            service_key = os.getenv("SUPABASE_SERVICE_ROLE_KEY")
+            if url and service_key:
+                cls._admin_client = create_client(url, service_key)
+            else:
+                print("  ⚠️ SUPABASE_SERVICE_KEY not set — falling back to anon key (RLS applies!)")
+                cls._admin_client = cls._get_client()
+        return cls._admin_client
 
     @classmethod
     def is_configured(cls) -> bool:
@@ -138,7 +153,7 @@ class AudiobookStorage:
         group_id = str(uuid.uuid4())  # Groups all parts together
 
         num_parts = (file_size + cls.CHUNK_SIZE - 1) // cls.CHUNK_SIZE
-        first_public_url = ""
+        all_public_urls = []
         total_uploaded = 0
 
         with open(local_path, "rb") as f:
@@ -160,8 +175,7 @@ class AudiobookStorage:
                 )
 
                 public_url = client.storage.from_(cls.BUCKET_NAME).get_public_url(storage_path)
-                if part_num == 1:
-                    first_public_url = public_url
+                all_public_urls.append(public_url)
 
                 # Estimate duration proportionally
                 part_duration = round(duration_minutes * (chunk_size / file_size), 1)
@@ -187,7 +201,8 @@ class AudiobookStorage:
         print(f"  ✅ Total uploadat: {num_parts} părți, {total_uploaded} bytes")
         return {
             "id": group_id,
-            "public_url": first_public_url,
+            "public_url": all_public_urls[0] if all_public_urls else "",
+            "all_public_urls": all_public_urls,
             "parts": num_parts,
         }
 

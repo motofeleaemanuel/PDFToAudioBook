@@ -118,12 +118,14 @@ function ConversionJobCard({ job, onStart, onCancel, onRemove, hasCredits = true
             
             <div className="flex flex-col min-w-0">
               <span className="text-base font-bold tracking-tight text-white truncate">
-                {job.file.name}
+                {job.file?.name || job.filename || "Unknown file"}
               </span>
               <div className="flex items-center gap-2 mt-0.5">
-                <span className="text-xs font-medium text-white/50 bg-white/10 px-2 py-0.5 rounded-full">
-                  {formatFileSize(job.file.size)}
-                </span>
+                {job.file?.size && (
+                  <span className="text-xs font-medium text-white/50 bg-white/10 px-2 py-0.5 rounded-full">
+                    {formatFileSize(job.file.size)}
+                  </span>
+                )}
                 {status === "pending" && <span className="text-xs text-yellow-500/80 font-medium">Ready</span>}
                 {status === "completed" && <span className="text-xs text-green-400 font-medium">Done</span>}
                 {status === "error" && <span className="text-xs text-red-400 font-medium truncate max-w-[200px]">{error}</span>}
